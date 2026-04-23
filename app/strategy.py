@@ -23,14 +23,18 @@ class DataProvider:
         return df
 
     def fetch_bars(self, interval: str, period: str) -> pd.DataFrame:
-        df = yf.download(
-            tickers=self.symbol,
-            interval=interval,
-            period=period,
-            auto_adjust=False,
-            progress=False,
-        )
-        df = self._normalize_columns(df)
+        try:
+            df = yf.download(
+                tickers=self.symbol,
+                interval=interval,
+                period=period,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            df = self._normalize_columns(df)
+        except Exception:
+            return self._mock_data(interval)
 
         if df.empty:
             return self._mock_data(interval)
