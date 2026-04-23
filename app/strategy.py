@@ -6,11 +6,12 @@ from datetime import datetime, timedelta
 class SignalService:
     def __init__(self, symbol="^TWII"):
         self.symbol = symbol
-        self.point_value = 50      
+        self.point_value = 10      # 更新：微台一點 10 元
         self.fee = 20              
         self.tax_rate = 0.00002    
         self.slippage = 2          
         self.initial_margin = 20000 
+        self.amount_stop_limit = -20000 # 硬性金額停損門檻
 
     def _is_expiry_day(self, dt):
         dt_naive = dt.replace(tzinfo=None)
@@ -56,9 +57,6 @@ class SignalService:
         }
 
     def run_backtest(self, df_30m, df_60m, df_1d, capital, start, end, stop_loss, trailing):
-        """
-        三框共振回測：進場必須滿足 30M & 60M & 1D 訊號一致
-        """
         # 將 60M 與 1D 的訊號對齊到 30M 時間軸
         s_60m = df_60m[['trend_sig']].resample('30min').ffill().rename(columns={'trend_sig': 'sig_60m'})
         s_1d = df_1d[['trend_sig']].resample('30min').ffill().rename(columns={'trend_sig': 'sig_1d'})
@@ -74,21 +72,25 @@ class SignalService:
             p, d = float(df['close'].iloc[i]), df.index[i]
             is_exp = self._is_expiry_day(d)
             
-            # 取得當前三框訊號
             s30, s60, s1d = df['trend_sig'].iloc[i], df['sig_60m'].iloc[i], df['sig_1d'].iloc[i]
             resonance_long = (s30 == '多' and s60 == '多' and s1d == '多')
             resonance_short = (s30 == '空' and s60 == '空' and s1d == '空')
 
             if not in_pos:
-                # 三框共振做多進場
                 if resonance_long and df['vol_ok'].iloc[i] and not is_exp:
                     in_pos, pos_type, entry_p, entry_d, peak_p = True, 'long', p + self.slippage, d, p
-                # 三框共振放空進場
                 elif resonance_short and df['vol_ok'].iloc[i] and not is_exp:
                     in_pos, pos_type, entry_p, entry_d, peak_p = True, 'short', p - self.slippage, d, p
             else:
+                # 計算當前即時點差損益 (未扣成本前)
+                raw_diff = (p - entry_p) if pos_type == 'long' else (entry_p - p)
+                current_raw_pnl = raw_diff * self.point_value
+                
                 reason = ""
-                if pos_type == 'long':
+                # --- 新增：硬性金額停損 20,000 元 ---
+                if current_raw_pnl <= self.amount_stop_limit:
+                    reason = "金額停損 (2萬)"
+                elif pos_type == 'long':
                     peak_p = max(peak_p, p)
                     if p < entry_p * (1 - stop_loss): reason = "固定停損"
                     elif p < peak_p * (1 - trailing): reason = "移動停利"
@@ -103,8 +105,7 @@ class SignalService:
                 if reason:
                     exit_p = p - self.slippage if pos_type == 'long' else p + self.slippage
                     cost = (entry_p + exit_p) * self.point_value * self.tax_rate + (self.fee * 2)
-                    raw_pnl = (exit_p - entry_p) if pos_type == 'long' else (entry_p - exit_p)
-                    net_pnl = raw_pnl * self.point_value - cost
+                    net_pnl = raw_diff * self.point_value - cost
                     trades.append({
                         "時間": entry_d, "類型": "做多" if pos_type == 'long' else "放空",
                         "出場原因": reason, "進場價": round(entry_p), "出場價": round(exit_p),
