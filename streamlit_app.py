@@ -1,60 +1,54 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from app.strategy import SignalService
 
-st.set_page_config(page_title="My-Futures 高還原度回測", layout="wide")
+st.set_page_config(page_title="My-Futures 專業過濾版", layout="wide")
 service = SignalService()
 
-st.title("📊 My-Futures：專業回測與資料匯出")
+st.title("🛡️ My-Futures：波動過濾與結算避險系統")
 
-# 側邊欄：回測區間選擇
 with st.sidebar:
     st.header("回測參數設定")
     capital = st.number_input("起始資金 (萬元)", value=100000) * 10000
-    
-    # 日期選擇器
-    today = datetime.now()
-    default_start = today - timedelta(days=59)
-    date_range = st.date_input("選擇回測期間 (30M 最長 60天)", [default_start, today])
-    
-    stop_loss = st.slider("固定停損 (%)", 0.5, 5.0, 2.0) / 100
-    trailing = st.slider("追蹤停利 (%)", 0.5, 3.0, 1.5) / 100
+    date_range = st.date_input("回測區間", [datetime.now() - timedelta(days=59), datetime.now()])
+    stop_loss = st.slider("停損 (%)", 0.5, 5.0, 2.0) / 100
+    trailing = st.slider("停利 (%)", 0.5, 3.0, 1.5) / 100
 
 if len(date_range) == 2:
-    start_dt, end_dt = date_range
-    with st.spinner("讀取歷史數據中..."):
-        df_raw = service.fetch_data("30m", "60d") # 30M 限額 60天
-        df_ind = service.compute_indicators(df_raw)
-        trades_df = service.run_backtest(df_ind, capital, str(start_dt), str(end_dt), stop_loss, trailing)
+    start, end = date_range
+    df_raw = service.fetch_data("30m", "60d")
+    res = service.compute_indicators(df_raw)
+    df_trades = service.run_backtest(res['df'], capital, str(start), str(end), stop_loss, trailing)
 
-    if trades_df is not None:
-        # 1. 下載功能
-        csv = trades_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="📥 下載完整回測報告 (CSV)",
-            data=csv,
-            file_name=f"backtest_{start_dt}_to_{end_dt}.csv",
-            mime="text/csv",
-        )
+    # 1. 狀態看板
+    c1, c2, c3 = st.columns(3)
+    c1.metric("當前趨勢", res['dir'])
+    c2.metric("波動過濾狀態", "符合進場" if res['df']['vol_ok'].iloc[-1] else "波動太小")
+    c3.metric("近期結算日", "避開交易" if service._is_expiry_day(datetime.now()) else "正常交易")
 
-        # 2. 顯示數據表
-        st.subheader("📝 詳細交易日誌")
-        st.dataframe(trades_df, use_container_width=True)
+    st.divider()
 
-        # 3. 策略診斷與還原度分析
-        st.divider()
-        c1, c2 = st.columns(2)
-        with c1:
-            st.info("### 🧐 回測還原度檢測")
-            st.write("1. **滑價補償：** 已手動加入單邊 2 點滑價，模擬實盤掛單成本。")
-            st.write("2. **稅費計算：** 已包含萬分之 0.2 期交稅與單邊 20 元手續費。")
-            st.write("3. **價格誤差：** 使用 `^TWII` 加權指數作為代用，**未包含期現貨價差 (Basis)**。")
+    if df_trades is not None:
+        # 2. 績效統計
+        wins = df_trades[df_trades['損益'] > 0]
+        expectancy = (len(wins)/len(df_trades) * wins['損益'].mean()) - (len(df_trades[df_trades['損益']<=0])/len(df_trades) * abs(df_trades[df_trades['損益']<=0]['損益'].mean()))
         
-        with c2:
-            st.warning("### 🔄 轉倉處理提醒")
-            st.write("1. **價差跳空：** 台指期每月結算會產生 100-200 點不等的除息或價差缺口。")
-            st.write("2. **回測偏差：** 本回測使用連續價格，**未扣除轉倉當天的跳空**，實務上獲利可能會略低於此數據。")
-            st.write("**建議：** 若回測淨利潤低於轉倉缺口總和，該策略不具備實戰價值。")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("累積損益", f"{df_trades['損益'].sum():,}")
+        m2.metric("每筆期望值", f"{expectancy:,.1f}")
+        m3.metric("勝率", f"{len(wins)/len(df_trades)*100:.1f}%")
+
+        # 3. 下載與日誌
+        st.download_button("📥 下載完整 CSV 報告", df_trades.to_csv().encode('utf-8-sig'), "report.csv")
+        st.dataframe(df_trades, use_container_width=True)
+        
+        # 4. 診斷報告
+        st.subheader("🤖 策略診斷")
+        if expectancy > 50:
+            st.success(f"期望值達標 ({expectancy:,.0f})：這套『EMA+ATR過濾』策略在歷史數據中具備實戰獲利能力。")
+        else:
+            st.error(f"期望值過低：即使加入了波動過濾，目前的獲利仍無法有效覆蓋風險。")
     else:
-        st.error("所選期間內無交易訊號。")
+        st.warning("此區間無交易訊號。")
