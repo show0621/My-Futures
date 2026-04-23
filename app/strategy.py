@@ -30,76 +30,73 @@ class SignalService:
         df = df.copy()
         df['ema_f'] = df['close'].ewm(span=12).mean()
         df['ema_s'] = df['close'].ewm(span=26).mean()
-        
-        # ATR 波動計算
         high, low, close_prev = df['high'], df['low'], df['close'].shift(1)
         tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
-        df['atr_ma'] = df['atr'].rolling(window=20).mean() # 20日ATR均線
+        df['atr_ma'] = df['atr'].rolling(window=20).mean()
         df['vol_ok'] = df['atr'] > df['atr_ma']
-        
-        # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
         df['rsi'] = df['rsi'].fillna(50)
-        
         last = df.iloc[-1]
         long_prob, short_prob = 0, 0
         if last['close'] > last['ema_f']: long_prob += 35
         if last['ema_f'] > last['ema_s']: long_prob += 35
         if last['rsi'] > 50: long_prob += 30
-        
         if last['close'] < last['ema_f']: short_prob += 35
         if last['ema_f'] < last['ema_s']: short_prob += 35
         if last['rsi'] < 50: short_prob += 30
-        
         prob = long_prob if long_prob >= short_prob else short_prob
         direction = "多" if long_prob > short_prob else "空"
         if abs(long_prob - short_prob) < 20: direction = "盤整"
-        
-        return {
-            "dir": direction, "prob": prob, "df": df, 
-            "vol_ok": last['vol_ok'], "atr_val": last['atr'], "atr_ma_val": last['atr_ma']
-        }
+        return {"dir": direction, "prob": prob, "df": df, "vol_ok": last['vol_ok'], "atr_val": last['atr'], "atr_ma_val": last['atr_ma']}
 
-    def run_backtest(self, df, capital, start, end, stop_loss, trailing):
-        if 'ema_f' not in df.columns:
-            df = self.compute_indicators(df)['df']
+    def run_backtest(self, df, df_1d, capital, start, end, stop_loss, trailing):
+        """
+        加入日線趨勢過濾 (1D Trend Filter)
+        """
+        # 計算 1D 趨勢
+        df_1d = df_1d.copy()
+        df_1d['ema_f'] = df_1d['close'].ewm(span=12).mean()
+        df_1d['ema_s'] = df_1d['close'].ewm(span=26).mean()
+        df_1d['trend'] = np.where(df_1d['ema_f'] < df_1d['ema_s'], 'short', 'long')
+        
+        # 將 1D 趨勢對齊到 30M 資料
+        df_1d_trend = df_1d[['trend']].resample('30min').ffill()
+        df = df.join(df_1d_trend, rsuffix='_daily')
+        
         df = df.loc[start:end].copy()
         if df.empty: return None
         
-        trades = []
-        equity = [capital]
-        in_pos, pos_type = False, None # None, 'long', 'short'
-        entry_p, entry_d, peak_p = 0, None, 0
+        trades, equity = [], [capital]
+        in_pos, pos_type, entry_p, entry_d, peak_p = False, None, 0, None, 0
         
         for i in range(len(df)):
             p, d = float(df['close'].iloc[i]), df.index[i]
             is_exp = self._is_expiry_day(d)
+            daily_trend = df['trend'].iloc[i] # 取得該時刻的日線趨勢
             
             if not in_pos:
-                # 做多進場: 金叉 + 波動OK
+                # 做多: 金叉 + 波動OK
                 if df['ema_f'].iloc[i] > df['ema_s'].iloc[i] and df['vol_ok'].iloc[i] and not is_exp:
                     in_pos, pos_type, entry_p, entry_d, peak_p = True, 'long', p + self.slippage, d, p
-                # 放空進場: 死叉 + 波動OK
-                elif df['ema_f'].iloc[i] < df['ema_s'].iloc[i] and df['vol_ok'].iloc[i] and not is_exp:
+                # 放空: 死叉 + 波動OK + 日線也是空頭 (新增過濾)
+                elif df['ema_f'].iloc[i] < df['ema_s'].iloc[i] and df['vol_ok'].iloc[i] and not is_exp and daily_trend == 'short':
                     in_pos, pos_type, entry_p, entry_d, peak_p = True, 'short', p - self.slippage, d, p
             else:
                 reason = ""
-                days_held = (d - entry_d).days
-                
                 if pos_type == 'long':
                     peak_p = max(peak_p, p)
                     if p < entry_p * (1 - stop_loss): reason = "固定停損"
                     elif p < peak_p * (1 - trailing): reason = "移動停利"
-                else: # short
+                else:
                     peak_p = min(peak_p, p)
                     if p > entry_p * (1 + stop_loss): reason = "固定停損"
                     elif p > peak_p * (1 + trailing): reason = "移動停利"
                 
-                if days_held >= 7: reason = "7天強平"
+                if (d - entry_d).days >= 7: reason = "7天強平"
                 elif is_exp: reason = "結算日避險"
                 
                 if reason:
@@ -118,14 +115,11 @@ class SignalService:
         if not trades: return None
         tdf = pd.DataFrame(trades)
         equity_series = pd.Series(equity)
-        mdd = (equity_series.cummax() - equity_series).max()
-        sharpe = (tdf['報酬率'].mean() / tdf['報酬率'].std() * np.sqrt(252)) if len(tdf) > 1 else 0
-        
         return {
             "total_pnl": tdf['損益'].sum(),
-            "mdd": mdd,
+            "mdd": (equity_series.cummax() - equity_series).max(),
             "max_ret": tdf['報酬率'].max(),
-            "sharpe": sharpe,
+            "sharpe": (tdf['報酬率'].mean() / tdf['報酬率'].std() * np.sqrt(252)) if len(tdf) > 1 else 0,
             "win_rate": len(tdf[tdf['損益']>0])/len(tdf),
             "trades": tdf
         }
