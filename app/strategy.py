@@ -35,71 +35,69 @@ class SignalService:
         high, low, close_prev = df['high'], df['low'], df['close'].shift(1)
         tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
-        df['atr_ma'] = df['atr'].rolling(window=20).mean() # 20日ATR均線
+        df['atr_ma'] = df['atr'].rolling(window=20).mean()
         df['vol_ok'] = df['atr'] > df['atr_ma']
+        
+        # 趨勢判定
+        df['trend_sig'] = '盤整'
+        df.loc[(df['ema_f'] > df['ema_s']), 'trend_sig'] = '多'
+        df.loc[(df['ema_f'] < df['ema_s']), 'trend_sig'] = '空'
         
         # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
-        df['rsi'] = df['rsi'].fillna(50)
         
         last = df.iloc[-1]
-        long_prob, short_prob = 0, 0
-        if last['close'] > last['ema_f']: long_prob += 35
-        if last['ema_f'] > last['ema_s']: long_prob += 35
-        if last['rsi'] > 50: long_prob += 30
-        
-        if last['close'] < last['ema_f']: short_prob += 35
-        if last['ema_f'] < last['ema_s']: short_prob += 35
-        if last['rsi'] < 50: short_prob += 30
-        
-        prob = long_prob if long_prob >= short_prob else short_prob
-        direction = "多" if long_prob > short_prob else "空"
-        if abs(long_prob - short_prob) < 20: direction = "盤整"
-        
         return {
-            "dir": direction, "prob": prob, "df": df, 
+            "dir": last['trend_sig'], "prob": 70 if last['vol_ok'] else 40, "df": df, 
             "vol_ok": last['vol_ok'], "atr_val": last['atr'], "atr_ma_val": last['atr_ma']
         }
 
-    def run_backtest(self, df, capital, start, end, stop_loss, trailing):
-        if 'ema_f' not in df.columns:
-            df = self.compute_indicators(df)['df']
+    def run_backtest(self, df_30m, df_60m, df_1d, capital, start, end, stop_loss, trailing):
+        """
+        三框共振回測：進場必須滿足 30M & 60M & 1D 訊號一致
+        """
+        # 將 60M 與 1D 的訊號對齊到 30M 時間軸
+        s_60m = df_60m[['trend_sig']].resample('30min').ffill().rename(columns={'trend_sig': 'sig_60m'})
+        s_1d = df_1d[['trend_sig']].resample('30min').ffill().rename(columns={'trend_sig': 'sig_1d'})
+        
+        df = df_30m.join(s_60m).join(s_1d)
         df = df.loc[start:end].copy()
         if df.empty: return None
         
-        trades = []
-        equity = [capital]
-        in_pos, pos_type = False, None # None, 'long', 'short'
-        entry_p, entry_d, peak_p = 0, None, 0
+        trades, equity = [], [capital]
+        in_pos, pos_type, entry_p, entry_d, peak_p = False, None, 0, None, 0
         
         for i in range(len(df)):
             p, d = float(df['close'].iloc[i]), df.index[i]
             is_exp = self._is_expiry_day(d)
             
+            # 取得當前三框訊號
+            s30, s60, s1d = df['trend_sig'].iloc[i], df['sig_60m'].iloc[i], df['sig_1d'].iloc[i]
+            resonance_long = (s30 == '多' and s60 == '多' and s1d == '多')
+            resonance_short = (s30 == '空' and s60 == '空' and s1d == '空')
+
             if not in_pos:
-                # 做多進場: 金叉 + 波動OK
-                if df['ema_f'].iloc[i] > df['ema_s'].iloc[i] and df['vol_ok'].iloc[i] and not is_exp:
+                # 三框共振做多進場
+                if resonance_long and df['vol_ok'].iloc[i] and not is_exp:
                     in_pos, pos_type, entry_p, entry_d, peak_p = True, 'long', p + self.slippage, d, p
-                # 放空進場: 死叉 + 波動OK
-                elif df['ema_f'].iloc[i] < df['ema_s'].iloc[i] and df['vol_ok'].iloc[i] and not is_exp:
+                # 三框共振放空進場
+                elif resonance_short and df['vol_ok'].iloc[i] and not is_exp:
                     in_pos, pos_type, entry_p, entry_d, peak_p = True, 'short', p - self.slippage, d, p
             else:
                 reason = ""
-                days_held = (d - entry_d).days
-                
                 if pos_type == 'long':
                     peak_p = max(peak_p, p)
                     if p < entry_p * (1 - stop_loss): reason = "固定停損"
                     elif p < peak_p * (1 - trailing): reason = "移動停利"
-                else: # short
+                else:
                     peak_p = min(peak_p, p)
                     if p > entry_p * (1 + stop_loss): reason = "固定停損"
                     elif p > peak_p * (1 + trailing): reason = "移動停利"
                 
-                if days_held >= 7: reason = "7天強平"
+                if (d - entry_d).days >= 7: reason = "7天強平"
                 elif is_exp: reason = "結算日避險"
                 
                 if reason:
@@ -118,14 +116,11 @@ class SignalService:
         if not trades: return None
         tdf = pd.DataFrame(trades)
         equity_series = pd.Series(equity)
-        mdd = (equity_series.cummax() - equity_series).max()
-        sharpe = (tdf['報酬率'].mean() / tdf['報酬率'].std() * np.sqrt(252)) if len(tdf) > 1 else 0
-        
         return {
             "total_pnl": tdf['損益'].sum(),
-            "mdd": mdd,
+            "mdd": (equity_series.cummax() - equity_series).max(),
             "max_ret": tdf['報酬率'].max(),
-            "sharpe": sharpe,
+            "sharpe": (tdf['報酬率'].mean() / tdf['報酬率'].std() * np.sqrt(252)) if len(tdf) > 1 else 0,
             "win_rate": len(tdf[tdf['損益']>0])/len(tdf),
             "trades": tdf
         }
