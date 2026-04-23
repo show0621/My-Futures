@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from datetime import datetime, timedelta
 
 class SignalService:
     def __init__(self, symbol="^TWII"):
@@ -8,7 +9,17 @@ class SignalService:
         self.point_value = 50      # 微台 1 點 50 元
         self.fee = 20              # 單邊手續費
         self.tax_rate = 0.00002
-        self.slippage_points = 2   # 每筆交易預設滑價 2 點（模擬還原度損耗）
+        self.slippage = 2          # 單邊滑價補償
+        self.initial_margin = 20000 # 預估保證金
+
+    def _is_expiry_day(self, dt):
+        """判斷是否為台指期結算日 (每月第三個週三)"""
+        # 找到該月 1 號
+        first_day = datetime(dt.year, dt.month, 1)
+        # 找到第一個週三 (weekday: 0=Mon, 2=Wed)
+        first_wed = first_day + timedelta(days=(2 - first_day.weekday() + 7) % 7)
+        third_wed = first_wed + timedelta(weeks=2)
+        return dt.date() == third_wed.date()
 
     def fetch_data(self, interval, period):
         df = yf.download(self.symbol, interval=interval, period=period, progress=False)
@@ -19,55 +30,38 @@ class SignalService:
 
     def compute_indicators(self, df):
         df = df.copy()
-        df['ema_fast'] = df['close'].ewm(span=12).mean()
-        df['ema_slow'] = df['close'].ewm(span=26).mean()
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
-        return df
+        # 趨勢與 RSI
+        df['ema_f'] = df['close'].ewm(span=12).mean()
+        df['ema_s'] = df['close'].ewm(span=26).mean()
+        
+        # ATR 波動率過濾器
+        high, low, close_prev = df['high'], df['low'], df['close'].shift(1)
+        tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(window=14).mean()
+        df['atr_ma'] = df['atr'].rolling(window=20).mean() # ATR 的均線
+        df['vol_ok'] = df['atr'] > df['atr_ma'] # 只有波動高於平均才進場
+        
+        last = df.iloc[-1]
+        score = 0
+        if last['close'] > last['ema_f']: score += 35
+        if last['ema_f'] > last['ema_s']: score += 35
+        if last['vol_ok']: score += 30 # 波動率加分
+        
+        direction = "多" if score >= 70 else "空" if score <= 30 else "觀望"
+        return {"dir": direction, "prob": score, "df": df}
 
-    def run_backtest(self, df, initial_capital, start_date, end_date, stop_loss_pct=0.02, trailing_pct=0.015):
-        # 日期過濾
-        df = df.loc[start_date:end_date].copy()
-        if df.empty: return None
-
+    def run_backtest(self, df, capital, start, end, stop_loss, trailing):
+        df = df.loc[start:end].copy()
+        if 'ema_f' not in df.columns:
+            df = self.compute_indicators(df)['df']
+            
         trades = []
-        equity = initial_capital
-        in_pos = False
-        entry_p, entry_d, max_p = 0, None, 0
-
+        equity = capital
+        in_pos, entry_p, entry_d, max_p = False, 0, None, 0
+        
         for i in range(len(df)):
-            p = float(df['close'].iloc[i])
-            d = df.index[i]
+            p, d = float(df['close'].iloc[i]), df.index[i]
+            is_exp = self._is_expiry_day(d)
             
             if not in_pos:
-                if df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i]:
-                    # 進場：考慮滑價
-                    in_pos, entry_p, entry_d, max_p = True, p + self.slippage_points, d, p
-            else:
-                max_p = max(max_p, p)
-                days = (d - entry_d).days
-                reason = ""
-                if p < entry_p * (1 - stop_loss_pct): reason = "固定停損"
-                elif p < max_p * (1 - trailing_pct): reason = "移動停利"
-                elif days >= 7: reason = "7天強平"
-                
-                if reason:
-                    # 出場：考慮滑價
-                    exit_price = p - self.slippage_points
-                    cost = (entry_p + exit_price) * self.point_value * self.tax_rate + (self.fee * 2)
-                    net_pnl = (exit_price - entry_p) * self.point_value - cost
-                    equity += net_pnl
-                    trades.append({
-                        "進場時間": entry_d,
-                        "出場時間": d,
-                        "進場價": round(entry_p, 1),
-                        "出場價": round(exit_price, 1),
-                        "出場原因": reason,
-                        "淨損益": round(net_pnl),
-                        "帳戶餘額": round(equity)
-                    })
-                    in_pos = False
-
-        return pd.DataFrame(trades) if trades else None
+                #
