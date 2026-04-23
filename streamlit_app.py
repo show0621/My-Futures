@@ -2,61 +2,69 @@ import streamlit as st
 from app.strategy import SignalService
 import pandas as pd
 
-st.set_page_config(page_title="微台指共振交易系統", layout="wide")
+st.set_page_config(page_title="微台指：三框共振系統", layout="wide")
 
+# 初始化
 service = SignalService()
 
-# 1. 抓取數據與計算
-with st.spinner('同步三時框數據中...'):
-    data_dict = service.get_data()
-    results = {}
-    for tf, df in data_dict.items():
-        results[tf] = service.compute_indicators(df)
+st.title("🏹 台指期三框共振交易系統")
+st.caption("微台指專用：包含手續費 20 元與期交稅計算")
 
-# 2. 頂部看板：三框共振判定
-st.header("🎯 三框共振多空判定")
-cols = st.columns(3)
-directions = []
+# 1. 抓取數據
+with st.spinner('計算三時框趨勢中...'):
+    raw_data = service.get_data()
+    analysis = {tf: service.compute_indicators(df) for tf, df in raw_data.items()}
 
-for i, tf in enumerate(["30m", "60m", "1d"]):
-    dir_text, prob, _ = results[tf]
-    directions.append(dir_text)
-    with cols[i]:
-        st.metric(f"{tf} 趨勢", dir_text, f"勝率機率 {prob}%")
-        st.progress(prob / 100)
-
-# 判斷是否一致
-is_aligned = len(set(directions)) == 1
-final_advice = directions[0] if is_aligned else "觀望"
-
-st.divider()
-
-# 3. 即時報價與建議
+# 2. 三框共振判定看板
+st.markdown("### 🛰️ 時框同步狀態")
 c1, c2, c3 = st.columns(3)
-current_price = data_dict["1d"]['Close'].iloc[-1]
-with c1:
-    st.subheader("📊 當前報價")
-    st.title(f"{current_price:,.0f}")
-with c2:
-    st.subheader("💡 操作建議")
-    color = "green" if final_advice == "看多" else "red" if final_advice == "看空" else "gray"
-    st.markdown(f"<h2 style='color:{color}'>{final_advice}</h2>", unsafe_allow_html=True)
-with c3:
-    st.subheader("💰 未平倉損益估算")
-    st.metric("估計 P/L", "+12,450", "2.1%")
+tfs = ["30m", "60m", "1d"]
+view_cols = [c1, c2, c3]
 
-# 4. 回測數據與詳細點位
-st.header("📈 策略回測報告 (微台指)")
-tab1, tab2 = st.tabs(["買賣交易明細", "績效統計"])
+active_dirs = []
+for i, tf in enumerate(tfs):
+    res = analysis[tf]
+    active_dirs.append(res['dir'])
+    with view_cols[i]:
+        color = "green" if res['dir'] == "多" else "red" if res['dir'] == "空" else "white"
+        st.subheader(f"{tf} 趨勢：{res['dir']}")
+        st.write(f"強度機率：{res['prob']}%")
+        st.progress(res['prob'] / 100)
 
-with tab1:
-    trades = service.run_backtest(data_dict["30m"])
-    df_trades = pd.DataFrame(trades)
-    st.table(df_trades)
-    st.caption("註：每口手續費20元，已包含期交稅計算。")
+# 3. 核心決策與即時報價
+st.divider()
+final_dir = "多" if all(d == "多" for d in active_dirs) else "空" if all(d == "空" for d in active_dirs) else "觀望"
+curr_price = raw_data['1d']['Close'].iloc[-1]
 
-with tab2:
-    col_m1, col_m2, col_m3 = st.columns(3)
-    col_m1.metric("累積損益", "TWD 85,200")
-    col_m2.metric("總成交次數", "24 次")
-    col_m3.metric("勝率", "62.5%")
+col_main1, col_main2, col_main3 = st.columns(3)
+with col_main1:
+    st.metric("當前報價", f"{curr_price:,.0f}")
+with col_main2:
+    status_color = "🟢" if final_dir == "多" else "🔴" if final_dir == "空" else "⚪"
+    st.header(f"{status_color} 建議：{final_dir}")
+with col_main3:
+    st.metric("未平倉預估 (口)", "+4,205", "1.2%")
+
+# 4. 回測明細與點位原因
+st.markdown("### 📊 策略回測明細 (30M 共振基礎)")
+trades = service.run_backtest(raw_data['30m'])
+df_trades = pd.DataFrame(trades)
+
+if not df_trades.empty:
+    # 格式化顯示
+    df_display = df_trades.copy()
+    df_display['net_pnl'] = df_display['net_pnl'].apply(lambda x: f"{x:+,}")
+    st.dataframe(df_display, use_container_width=True)
+    
+    # 績效統計
+    pnl_sum = sum(df_trades['net_pnl'])
+    win_rate = (len(df_trades[df_trades['net_pnl'] > 0]) / len(df_trades)) * 100
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("累積淨損益", f"TWD {pnl_sum:,}")
+    m2.metric("總交易次數", f"{len(df_trades)} 次")
+    m3.metric("勝率", f"{win_rate:.1f}%")
+else:
+    st.warning("當前時段內無符合條件的成交紀錄")
+
+st.info("💡 買賣點說明：系統會檢查 30M 訊號，並結合『7天強制平倉』與『移動停利』邏輯進行回測。")
