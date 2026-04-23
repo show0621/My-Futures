@@ -2,77 +2,67 @@ import streamlit as st
 import pandas as pd
 from app.strategy import SignalService
 
-st.set_page_config(page_title="微台指三框共振監控", layout="wide")
+st.set_page_config(page_title="My-Futures 實戰監控", layout="wide")
+service = SignalService()
 
-@st.cache_resource
-def get_service():
-    return SignalService()
+st.title("🚀 My-Futures 量化實戰分析儀表板")
 
-service = get_service()
+# 側邊欄設定
+with st.sidebar:
+    st.header("資金與風險設定")
+    # 100000 萬元 = 10 億，這裡預設為使用者輸入的值
+    capital = st.number_input("起始資金 (萬元)", value=100000) * 10000
+    stop_loss = st.slider("停損比例 (%)", 0.5, 10.0, 2.0) / 100
+    trailing = st.slider("追蹤停利 (%)", 0.5, 5.0, 1.5) / 100
 
-st.title("🎯 微台指：三框共振與動態停利系統")
+with st.spinner("正在進行大數據回測..."):
+    df_raw = service.fetch_data("30m", "60d")
+    analysis = service.compute_indicators(df_raw)
+    perf = service.run_backtest(analysis['df'], capital, stop_loss, trailing)
 
-with st.spinner("同步數據中..."):
-    # 抓取原始數據
-    df_30m_raw = service.fetch_data("30m", "60d")
-    df_60m_raw = service.fetch_data("60m", "60d")
-    df_1d_raw = service.fetch_data("1d", "2y")
+# 1. 頂部核心指標
+if perf:
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("夏普比率 (Sharpe)", f"{perf['sharpe']:.2f}")
+    m2.metric("最大回測 (MDD)", f"{perf['mdd']:,.0f}", delta_color="inverse")
+    m3.metric("期望值 (每筆)", f"{perf['expectancy']:,.1f} 元")
+    m4.metric("平均盈虧比", f"{perf['profit_loss_ratio']:.2f}")
+
+    st.divider()
+
+    # 2. 保證金與水位監控
+    st.subheader("🛡️ 實時帳戶水位")
+    curr_price = float(df_raw['close'].iloc[-1])
+    current_equity = capital + perf['total_pnl']
+    used_margin = service.initial_margin # 假設一口
+    margin_level = (current_equity / used_margin) * 100
     
-    # 運算指標並獲取含指標的 DataFrame
-    res_30m = service.compute_indicators(df_30m_raw)
-    res_60m = service.compute_indicators(df_60m_raw)
-    res_1d = service.compute_indicators(df_1d_raw)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("當前權益總額", f"{current_equity:,.0f}")
+    c2.metric("使用保證金", f"{used_margin:,.0f}")
+    c3.metric("保證金維持率", f"{margin_level:.1f}%", help="低於 120% 有斷頭風險")
     
-    # 這裡我們獲取帶有 EMA 的 DataFrame 用於後續顯示或回測
-    df_30m_final = res_30m['df']
-
-st.subheader("🛰️ 時框同步狀態")
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("30M 趨勢", res_30m['dir'], f"強度 {res_30m['prob']}%")
-with c2:
-    st.metric("60M 趨勢", res_60m['dir'], f"強度 {res_60m['prob']}%")
-with c3:
-    st.metric("1D 趨勢", res_1d['dir'], f"強度 {res_1d['prob']}%")
-
-st.divider()
-
-# 即時報價顯示
-try:
-    curr_price = float(df_1d_raw['close'].iloc[-1])
-except:
-    curr_price = 0.0
-
-col_m1, col_m2 = st.columns(2)
-with col_m1:
-    st.header(f"💰 當前報價：{curr_price:,.0f}")
-with col_m2:
-    all_dirs = [res_30m['dir'], res_60m['dir'], res_1d['dir']]
-    if all(d == "多" for d in all_dirs):
-        advice, color = "強烈看多 (三框共振)", "green"
-    elif all(d == "空" for d in all_dirs):
-        advice, color = "強烈看空 (三框共振)", "red"
-    else:
-        advice, color = "方向不一 (觀望)", "gray"
-    st.markdown(f"### 操作建議：<span style='color:{color}'>{advice}</span>", unsafe_allow_html=True)
-
-# 回測明細
-st.subheader("📈 策略回測明細 (30M 基礎)")
-# 這裡傳入已經運算過指標的 df_30m_final
-trades = service.run_backtest(df_30m_final)
-
-if trades:
-    df_t = pd.DataFrame(trades)
-    st.dataframe(df_t, use_container_width=True)
-    
-    total_pnl = df_t['淨損益'].sum()
-    win_rate = (len(df_t[df_t['淨損益'] > 0]) / len(df_t)) * 100
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("累積淨損益", f"TWD {total_pnl:,}")
-    m2.metric("總交易次數", f"{len(df_t)} 次")
-    m3.metric("勝率", f"{win_rate:.1f}%")
+    # 3. 績效分析與建議
+    st.divider()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.write("### 績效數據表")
+        st.write(f"- **最大單筆報酬:** {perf['max_ret']*100:.2f}%")
+        st.write(f"- **平均每筆報酬:** {perf['avg_ret']*100:.2f}%")
+        st.write(f"- **勝率:** {perf['win_rate']*100:.1f}%")
+        
+    with col_b:
+        st.write("### 🤖 策略診斷報告")
+        is_profitable = perf['expectancy'] > 0
+        if is_profitable:
+            st.success(f"**結論：此策略具備賺錢潛力。**\n期望值為正 ({perf['expectancy']:.1f})，長期執行具備獲利基礎。")
+        else:
+            st.error("**結論：此策略目前無法獲利。**\n期望值為負，請務必修正參數。")
+            
+        st.info("### 🛠️ 建議修正方向")
+        if perf['win_rate'] < 0.4:
+            st.warning("⚠️ 勝率過低：建議加入 RSI 超買超賣過濾，或調寬固定停損門檻。")
+        if perf['sharpe'] < 1:
+            st.warning("⚠️ 風險波動過大：建議調緊移動停利，以鎖住利潤。")
 else:
-    st.info("近期尚無符合條件的成交紀錄。")
-
-st.caption("備註：回測包含 7天強平、移動停利 1.5% 與固定停損 2% 邏輯。")
+    st.error("數據不足，無法生成分析報告。")
