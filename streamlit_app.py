@@ -14,11 +14,10 @@ with st.sidebar:
     date_range = st.date_input("選擇回測區間", [datetime.now() - timedelta(days=59), datetime.now()])
     
     st.divider()
-    # 預設縮小 0.5% 至 1.5%
     sl_pct = st.slider("固定停損 (%)", 0.5, 10.0, 1.5) / 100 
     tp_pct = st.slider("移動停利 (%)", 0.5, 5.0, 1.5) / 100
     
-    st.info("### 🛡️ 策略核心：三框共振\n1. **進場**：30M/60M/1D 訊號必須完全一致（全多或全空）。\n2. **目的**：利用大時框過濾掉小時框的假訊號，大幅降低 MDD。")
+    st.warning("### 🚨 強制平倉保險絲\n1. **金額停損**：單筆虧損達 20,000 元即刻平倉。\n2. **微台規格**：目前計算以 1 點 = 10 元 為準。")
 
 st.title("🏹 My-Futures：三框共振實戰監控")
 
@@ -46,13 +45,12 @@ def display_gauge(col, title, res):
 
 display_gauge(c1, "30分K (極短線)", res_30m)
 display_gauge(c2, "60分K (短線)", res_60m)
-display_gauge(c3, "日K (主趨勢趨勢)", res_1d)
+display_gauge(c3, "日K (主趨勢)", res_1d)
 
 # 3. 績效統計與回測
 st.divider()
 if len(date_range) == 2:
     start, end = date_range
-    # 執行三框共振回測
     perf = service.run_backtest(
         res_30m['df'], res_60m['df'], res_1d['df'], 
         capital, str(start), str(end), sl_pct, tp_pct
@@ -66,8 +64,8 @@ if len(date_range) == 2:
         m3.metric("夏普比率", f"{perf['sharpe']:.2f}")
         m4.metric("勝率", f"{perf['win_rate']*100:.1f}%")
 
-        with st.expander("📝 查看詳細交易紀錄 (已過濾非共振訊號)"):
+        with st.expander("📝 查看詳細交易紀錄 (含金額停損原因)"):
             st.dataframe(perf['trades'], use_container_width=True)
             st.download_button("📥 下載共振回測報告", perf['trades'].to_csv().encode('utf-8-sig'), "resonance_backtest.csv")
     else:
-        st.warning("當前區間內無符合『三框一致』的共振訊號，建議空手觀望。")
+        st.warning("當前區間內無符合『三框一致』的共振訊號。")
