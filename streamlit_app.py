@@ -1,68 +1,60 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timedelta
 from app.strategy import SignalService
 
-st.set_page_config(page_title="My-Futures 實戰監控", layout="wide")
+st.set_page_config(page_title="My-Futures 高還原度回測", layout="wide")
 service = SignalService()
 
-st.title("🚀 My-Futures 量化實戰分析儀表板")
+st.title("📊 My-Futures：專業回測與資料匯出")
 
-# 側邊欄設定
+# 側邊欄：回測區間選擇
 with st.sidebar:
-    st.header("資金與風險設定")
-    # 100000 萬元 = 10 億，這裡預設為使用者輸入的值
+    st.header("回測參數設定")
     capital = st.number_input("起始資金 (萬元)", value=100000) * 10000
-    stop_loss = st.slider("停損比例 (%)", 0.5, 10.0, 2.0) / 100
-    trailing = st.slider("追蹤停利 (%)", 0.5, 5.0, 1.5) / 100
-
-with st.spinner("正在進行大數據回測..."):
-    df_raw = service.fetch_data("30m", "60d")
-    analysis = service.compute_indicators(df_raw)
-    perf = service.run_backtest(analysis['df'], capital, stop_loss, trailing)
-
-# 1. 頂部核心指標
-if perf:
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("夏普比率 (Sharpe)", f"{perf['sharpe']:.2f}")
-    m2.metric("最大回測 (MDD)", f"{perf['mdd']:,.0f}", delta_color="inverse")
-    m3.metric("期望值 (每筆)", f"{perf['expectancy']:,.1f} 元")
-    m4.metric("平均盈虧比", f"{perf['profit_loss_ratio']:.2f}")
-
-    st.divider()
-
-    # 2. 保證金與水位監控
-    st.subheader("🛡️ 實時帳戶水位")
-    curr_price = float(df_raw['close'].iloc[-1])
-    current_equity = capital + perf['total_pnl']
-    used_margin = service.initial_margin # 假設一口
-    margin_level = (current_equity / used_margin) * 100
     
-    c1, c2, c3 = st.columns(3)
-    c1.metric("當前權益總額", f"{current_equity:,.0f}")
-    c2.metric("使用保證金", f"{used_margin:,.0f}")
-    c3.metric("保證金維持率", f"{margin_level:.1f}%", help="低於 120% 有斷頭風險")
+    # 日期選擇器
+    today = datetime.now()
+    default_start = today - timedelta(days=59)
+    date_range = st.date_input("選擇回測期間 (30M 最長 60天)", [default_start, today])
     
-    # 3. 績效分析與建議
-    st.divider()
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.write("### 績效數據表")
-        st.write(f"- **最大單筆報酬:** {perf['max_ret']*100:.2f}%")
-        st.write(f"- **平均每筆報酬:** {perf['avg_ret']*100:.2f}%")
-        st.write(f"- **勝率:** {perf['win_rate']*100:.1f}%")
+    stop_loss = st.slider("固定停損 (%)", 0.5, 5.0, 2.0) / 100
+    trailing = st.slider("追蹤停利 (%)", 0.5, 3.0, 1.5) / 100
+
+if len(date_range) == 2:
+    start_dt, end_dt = date_range
+    with st.spinner("讀取歷史數據中..."):
+        df_raw = service.fetch_data("30m", "60d") # 30M 限額 60天
+        df_ind = service.compute_indicators(df_raw)
+        trades_df = service.run_backtest(df_ind, capital, str(start_dt), str(end_dt), stop_loss, trailing)
+
+    if trades_df is not None:
+        # 1. 下載功能
+        csv = trades_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 下載完整回測報告 (CSV)",
+            data=csv,
+            file_name=f"backtest_{start_dt}_to_{end_dt}.csv",
+            mime="text/csv",
+        )
+
+        # 2. 顯示數據表
+        st.subheader("📝 詳細交易日誌")
+        st.dataframe(trades_df, use_container_width=True)
+
+        # 3. 策略診斷與還原度分析
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.info("### 🧐 回測還原度檢測")
+            st.write("1. **滑價補償：** 已手動加入單邊 2 點滑價，模擬實盤掛單成本。")
+            st.write("2. **稅費計算：** 已包含萬分之 0.2 期交稅與單邊 20 元手續費。")
+            st.write("3. **價格誤差：** 使用 `^TWII` 加權指數作為代用，**未包含期現貨價差 (Basis)**。")
         
-    with col_b:
-        st.write("### 🤖 策略診斷報告")
-        is_profitable = perf['expectancy'] > 0
-        if is_profitable:
-            st.success(f"**結論：此策略具備賺錢潛力。**\n期望值為正 ({perf['expectancy']:.1f})，長期執行具備獲利基礎。")
-        else:
-            st.error("**結論：此策略目前無法獲利。**\n期望值為負，請務必修正參數。")
-            
-        st.info("### 🛠️ 建議修正方向")
-        if perf['win_rate'] < 0.4:
-            st.warning("⚠️ 勝率過低：建議加入 RSI 超買超賣過濾，或調寬固定停損門檻。")
-        if perf['sharpe'] < 1:
-            st.warning("⚠️ 風險波動過大：建議調緊移動停利，以鎖住利潤。")
-else:
-    st.error("數據不足，無法生成分析報告。")
+        with c2:
+            st.warning("### 🔄 轉倉處理提醒")
+            st.write("1. **價差跳空：** 台指期每月結算會產生 100-200 點不等的除息或價差缺口。")
+            st.write("2. **回測偏差：** 本回測使用連續價格，**未扣除轉倉當天的跳空**，實務上獲利可能會略低於此數據。")
+            st.write("**建議：** 若回測淨利潤低於轉倉缺口總和，該策略不具備實戰價值。")
+    else:
+        st.error("所選期間內無交易訊號。")
