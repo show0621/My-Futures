@@ -46,17 +46,12 @@ class SignalService:
         df['rsi'] = df['rsi'].fillna(50)
         
         last = df.iloc[-1]
+        long_prob, short_prob = 0, 0
         
-        # 多空機率邏輯
-        long_prob = 0
-        short_prob = 0
-        
-        # 多方因子
         if last['close'] > last['ema_f']: long_prob += 35
         if last['ema_f'] > last['ema_s']: long_prob += 35
         if last['rsi'] > 50: long_prob += 30
         
-        # 空方因子
         if last['close'] < last['ema_f']: short_prob += 35
         if last['ema_f'] < last['ema_s']: short_prob += 35
         if last['rsi'] < 50: short_prob += 30
@@ -65,7 +60,7 @@ class SignalService:
         direction = "多" if long_prob > short_prob else "空"
         if abs(long_prob - short_prob) < 20: direction = "盤整"
         
-        return {"dir": direction, "prob": prob, "df": df, "vol_ok": last['vol_ok']}
+        return {"dir": direction, "prob": prob, "df": df, "vol_ok": last['vol_ok'], "atr_val": last['atr']}
 
     def run_backtest(self, df, capital, start, end, stop_loss, trailing):
         if 'ema_f' not in df.columns:
@@ -92,7 +87,7 @@ class SignalService:
                     exit_p = p - self.slippage
                     cost = (entry_p + exit_p) * self.point_value * self.tax_rate + (self.fee * 2)
                     net = (exit_p - entry_p) * self.point_value - cost
-                    trades.append({"進場時間": entry_d, "出場時間": d, "原因": reason, "損益": round(net)})
+                    trades.append({"進場時間": entry_d, "出場時間": d, "原因": reason, "進場價": round(entry_p), "出場價": round(exit_p), "損益": round(net)})
                     equity_curve.append(equity_curve[-1] + net)
                     in_pos = False
         if not trades: return None
