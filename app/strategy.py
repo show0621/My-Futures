@@ -10,86 +10,70 @@ class SignalService:
         self.fee = 20              # 單邊手續費 20 元
         self.tax_rate = 0.00002    # 期交稅 0.002%
         
-    def get_data(self):
-        # 抓取不同長度的數據
-        return {
-            "1d": yf.download(self.symbol, period="2y", interval="1d"),
-            "60m": yf.download(self.symbol, period="60d", interval="60m"),
-            "30m": yf.download(self.symbol, period="60d", interval="30m")
-        }
+    def fetch_data(self, interval, period):
+        df = yf.download(self.symbol, interval=interval, period=period, progress=False)
+        # 解決 yfinance MultiIndex 問題
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        return df
 
     def compute_indicators(self, df):
         df = df.copy()
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        
-        # 趨勢指標
-        df['ema12'] = df['Close'].ewm(span=12).mean()
-        df['ema26'] = df['Close'].ewm(span=26).mean()
+        # 均線
+        df['ema_fast'] = df['close'].ewm(span=12).mean()
+        df['ema_slow'] = df['close'].ewm(span=26).mean()
         # RSI
-        delta = df['Close'].diff()
+        delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / loss)))
         
-        # 多空機率 (0-100)
+        # 多空機率計算 (簡單模型)
         last = df.iloc[-1]
-        prob = 0
-        if last['Close'] > last['ema12']: prob += 30
-        if last['ema12'] > last['ema26']: prob += 40
-        if last['rsi'] > 55: prob += 30
-        elif last['rsi'] < 45: prob -= 30 # 減分代表看空力道
+        score = 0
+        if last['close'] > last['ema_fast']: score += 35
+        if last['ema_fast'] > last['ema_slow']: score += 35
+        if last['rsi'] > 50: score += 30
         
-        direction = "多" if prob > 50 else "空" if prob < -50 else "中立"
-        return {"dir": direction, "prob": abs(prob), "df": df}
+        direction = "多" if score >= 70 else "空" if score <= 30 else "盤整"
+        return {"dir": direction, "prob": score, "df": df}
 
     def run_backtest(self, df, stop_loss_pct=0.02, trailing_pct=0.015):
-        """
-        模擬交易邏輯：7天強平、移動停利、固定停損
-        """
-        df = df.copy()
+        # 策略：EMA 金叉進場，7天強平，或移動停利/停損出場
         trades = []
-        in_position = False
-        entry_price = 0
-        entry_date = None
-        max_price_since_entry = 0
+        in_pos = False
+        entry_p, entry_d, max_p = 0, None, 0
         
         for i in range(len(df)):
-            price = df['Close'].iloc[i]
-            date = df.index[i]
+            p = float(df['close'].iloc[i])
+            d = df.index[i]
             
-            # 訊號觸發 (這裡簡化為當 EMA 交叉時進場)
-            if not in_position:
-                if df['ema12'].iloc[i] > df['ema26'].iloc[i]:
-                    in_position = True
-                    entry_price = price
-                    entry_date = date
-                    max_price_since_entry = price
-                    trades.append({"entry_date": date, "type": "做多", "entry_price": price})
-            
+            if not in_pos:
+                # 簡單金叉進場
+                if df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i]:
+                    in_pos, entry_p, entry_d, max_p = True, p, d, p
             else:
-                max_price_since_entry = max(max_price_since_entry, price)
-                days_held = (date - entry_date).days
+                max_p = max(max_p, p)
+                days = (d - entry_d).days
                 
-                # 判斷出場條件
+                # 出場邏輯
                 reason = ""
-                if price < entry_price * (1 - stop_loss_pct): reason = "固定停損"
-                elif price < max_price_since_entry * (1 - trailing_pct): reason = "移動停利觸發"
-                elif days_held >= 7: reason = "7天強制平倉"
+                if p < entry_p * (1 - stop_loss_pct): reason = "固定停損"
+                elif p < max_p * (1 - trailing_pct): reason = "移動停利"
+                elif days >= 7: reason = "7天強平"
                 
                 if reason:
-                    exit_price = price
-                    # 計算稅費
-                    cost = (entry_price + exit_price) * self.point_value * self.tax_rate + (self.fee * 2)
-                    raw_pnl = (exit_price - entry_price) * self.point_value
-                    net_pnl = raw_pnl - cost
-                    
-                    trades[-1].update({
-                        "exit_date": date,
-                        "exit_price": exit_price,
-                        "reason": reason,
-                        "net_pnl": round(net_pnl)
+                    cost = (entry_p + p) * self.point_value * self.tax_rate + (self.fee * 2)
+                    net_pnl = (p - entry_p) * self.point_value - cost
+                    trades.append({
+                        "進場日期": entry_d.strftime('%Y-%m-%d %H:%M'),
+                        "出場日期": d.strftime('%Y-%m-%d %H:%M'),
+                        "類型": "做多",
+                        "進場價": round(entry_p),
+                        "出場價": round(p),
+                        "出場原因": reason,
+                        "淨損益": round(net_pnl)
                     })
-                    in_position = False
-        
-        return [t for t in trades if "exit_date" in t]
+                    in_pos = False
+        return trades
