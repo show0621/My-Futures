@@ -8,11 +8,10 @@ class SignalService:
         self.symbol = symbol
         self.point_value = 50      # 微台 1 點 50 元
         self.fee = 20              # 單邊手續費 20 元
-        self.tax_rate = 0.00002    # 期交稅 0.002%
+        self.tax_rate = 0.00002    # 期交稅
         
     def fetch_data(self, interval, period):
         df = yf.download(self.symbol, interval=interval, period=period, progress=False)
-        # 解決 yfinance MultiIndex 問題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
@@ -20,16 +19,19 @@ class SignalService:
 
     def compute_indicators(self, df):
         df = df.copy()
-        # 均線
+        # 均線運算
         df['ema_fast'] = df['close'].ewm(span=12).mean()
         df['ema_slow'] = df['close'].ewm(span=26).mean()
-        # RSI
+        # RSI 運算
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        df['rsi'] = 100 - (100 / (1 + (gain / loss)))
+        # 避免除以 0
+        rs = gain / loss.replace(0, np.nan)
+        df['rsi'] = 100 - (100 / (1 + rs))
+        df['rsi'] = df['rsi'].fillna(50)
         
-        # 多空機率計算 (簡單模型)
+        # 多空機率計算
         last = df.iloc[-1]
         score = 0
         if last['close'] > last['ema_fast']: score += 35
@@ -40,7 +42,10 @@ class SignalService:
         return {"dir": direction, "prob": score, "df": df}
 
     def run_backtest(self, df, stop_loss_pct=0.02, trailing_pct=0.015):
-        # 策略：EMA 金叉進場，7天強平，或移動停利/停損出場
+        # 重要：如果傳入的 df 沒指標，先跑一次運算
+        if 'ema_fast' not in df.columns:
+            df = self.compute_indicators(df)['df']
+            
         trades = []
         in_pos = False
         entry_p, entry_d, max_p = 0, None, 0
@@ -50,14 +55,13 @@ class SignalService:
             d = df.index[i]
             
             if not in_pos:
-                # 簡單金叉進場
+                # 金叉進場邏輯
                 if df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i]:
                     in_pos, entry_p, entry_d, max_p = True, p, d, p
             else:
                 max_p = max(max_p, p)
                 days = (d - entry_d).days
                 
-                # 出場邏輯
                 reason = ""
                 if p < entry_p * (1 - stop_loss_pct): reason = "固定停損"
                 elif p < max_p * (1 - trailing_pct): reason = "移動停利"
