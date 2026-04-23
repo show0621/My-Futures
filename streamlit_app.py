@@ -3,81 +3,78 @@ import pandas as pd
 from datetime import datetime, timedelta
 from app.strategy import SignalService
 
-st.set_page_config(page_title="My-Futures 量化監控", layout="wide")
+st.set_page_config(page_title="My-Futures 即時監控儀表板", layout="wide")
+service = SignalService()
 
-@st.cache_resource
-def get_service():
-    return SignalService()
+st.title("📊 My-Futures：多時框共振監控儀表板")
 
-service = get_service()
-
-st.title("🏹 My-Futures：專業量化實戰監控系統")
-
-with st.sidebar:
-    st.header("資金與風險設定")
-    # 100,000 萬元 = 10 億 TWD
-    capital_val = st.number_input("起始資金 (萬元)", value=10)
-    capital = capital_val * 10000
-    date_range = st.date_input("回測區間 (30M 最長 60天)", [datetime.now() - timedelta(days=59), datetime.now()])
-    st.divider()
-    stop_loss = st.slider("固定停損 (%)", 0.5, 5.0, 2.0) / 100
-    trailing = st.slider("移動停利 (%)", 0.5, 3.0, 1.5) / 100
-
-if len(date_range) == 2:
-    start_dt, end_dt = date_range
-    with st.spinner("正在抓取數據與回測..."):
-        df_raw = service.fetch_data("30m", "60d")
-        res = service.compute_indicators(df_raw)
-        perf = service.run_backtest(res['df'], capital, str(start_dt), str(end_dt), stop_loss, trailing)
-
-    # 1. 帳戶水位看板
-    st.subheader("🛡️ 帳戶水位監控")
-    curr_price = float(df_raw['close'].iloc[-1])
-    total_pnl = perf['total_pnl'] if perf else 0
-    current_equity = capital + total_pnl
-    margin_level = (current_equity / service.initial_margin) * 100
+# 1. 資料抓取與計算
+with st.spinner("同步 30M/60M/1D 數據中..."):
+    # 抓取數據
+    df_30m = service.fetch_data("30m", "60d")
+    df_60m = service.fetch_data("60m", "60d")
+    df_1d = service.fetch_data("1d", "2y")
     
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("權益總額", f"{current_equity:,.0f}")
-    c2.metric("當前報價 (日盤)", f"{curr_price:,.0f}")
-    c3.metric("保證金維持率", f"{margin_level:.0f}%")
-    c4.metric("波動狀態", "符合進場" if res['df']['vol_ok'].iloc[-1] else "波動太小", delta_color="normal")
+    # 計算各時框指標
+    res_30m = service.compute_indicators(df_30m)
+    res_60m = service.compute_indicators(df_60m)
+    res_1d = service.compute_indicators(df_1d)
 
-    st.divider()
+# 2. 多時框即時監控儀表板
+st.subheader("🛰️ 即時多時框監控")
+c1, c2, c3 = st.columns(3)
 
-    if perf:
-        # 2. 核心績效數據
-        st.subheader("📈 策略實戰診斷")
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("夏普比率", f"{perf['sharpe']:.2f}")
-        m2.metric("最大回測 (MDD)", f"{perf['mdd']:,.0f}", delta_color="inverse")
-        m3.metric("期望值 (每筆)", f"{perf['expectancy']:,.0f}")
-        m4.metric("盈虧比", f"{perf['pl_ratio']:.2f}")
-        m5.metric("勝率", f"{perf['win_rate']*100:.1f}%")
+def display_gauge(col, title, res):
+    with col:
+        color = "green" if res['dir'] == "多" else "red" if res['dir'] == "空" else "gray"
+        st.markdown(f"### {title}")
+        st.markdown(f"<h2 style='color:{color}'>{res['dir']} ({res['prob']}%)</h2>", unsafe_allow_html=True)
+        st.progress(res['prob'] / 100)
+        st.caption(f"波動過濾：{'✅ 通過' if res['vol_ok'] else '❌ 波動過小'}")
 
-        # 3. 診斷與建議
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.info("### 🤖 策略診斷結論")
-            if perf['expectancy'] > 500:
-                st.success(f"**診斷結果：這是一套可獲利的系統。**\n正期望值 ({perf['expectancy']:,.0f}) 顯示長期執行具備獲利優勢。")
-            else:
-                st.error("**診斷結果：獲利能力不足。**\n期望值過低，請優化波動過濾或調寬停損。")
-        
-        with col_b:
-            st.warning("### 🛠️ 策略優化方向")
-            st.write(f"- **避開結算日：** 系統已自動排除每月第三個週三。")
-            if perf['win_rate'] < 0.4:
-                st.write(f"- **勝率提醒：** 建議調寬停損，給趨勢更多空間。")
+display_gauge(c1, "30分K (極短線)", res_30m)
+display_gauge(c2, "60分K (短線)", res_60m)
+display_gauge(c3, "日K (中長線趨勢)", res_1d)
 
-        # 4. CSV 下載與時區轉換顯示
-        st.divider()
-        df_trades = perf['trades'].copy()
-        df_trades['進場時間'] = pd.to_datetime(df_trades['進場時間']).dt.tz_convert('Asia/Taipei').dt.strftime('%Y-%m-%d %H:%M')
-        df_trades['出場時間'] = pd.to_datetime(df_trades['出場時間']).dt.tz_convert('Asia/Taipei').dt.strftime('%Y-%m-%d %H:%M')
-        
-        csv_data = df_trades.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載完整 CSV 回測報告", csv_data, "backtest_report.csv", "text/csv")
-        st.dataframe(df_trades, use_container_width=True)
+
+
+# 3. 綜合分析報告與操作建議
+st.divider()
+st.subheader("📝 策略分析報告與建議")
+
+# 判斷共振
+all_dirs = [res_30m['dir'], res_60m['dir'], res_1d['dir']]
+is_resonance = len(set(all_dirs)) == 1
+
+col_report, col_action = st.columns([2, 1])
+
+with col_report:
+    st.write("**當前行情分析：**")
+    if is_resonance:
+        st.success(f"🔥 **三框共振確認**：目前 30M、60M 與日線趨勢高度一致，均顯示為『{all_dirs[0]}』方強勢。")
     else:
-        st.warning("所選區間內無交易訊號。")
+        st.warning(f"⚠️ **趨勢分歧**：目前時框方向為 {all_dirs}，建議等待信號同步。")
+    
+    st.write(f"- **趨勢強度**：平均機率 {sum([res_30m['prob'], res_60m['prob'], res_1d['prob']])/3:.1f}%")
+    st.write(f"- **波動環境**：{'當前波動率足以支撐趨勢發動。' if res_30m['vol_ok'] else '市場處於縮頭整理，容易產生假突破。'}")
+
+with col_action:
+    st.write("**🎯 操作建議：**")
+    if is_resonance and res_30m['vol_ok']:
+        if all_dirs[0] == "多":
+            st.button("🟢 建議做多", use_container_width=True)
+        else:
+            st.button("🔴 建議放空", use_container_width=True)
+    else:
+        st.button("⚪ 觀望 / 收手", use_container_width=True)
+    
+    st.caption("建議根據期望值 CSV 報告調整部位大小。")
+
+# 4. 回測區間與 CSV (保留原本功能)
+with st.expander("展開回測數據與 CSV 下載"):
+    capital = 1000000000 # 10億
+    perf = service.run_backtest(res_30m['df'], capital, str(datetime.now()-timedelta(days=30)), str(datetime.now()), 0.02, 0.015)
+    if perf:
+        st.write(f"近期期望值：{perf['expectancy']:,.0f}")
+        st.download_button("📥 下載回測報告", perf['trades'].to_csv().encode('utf-8-sig'), "backtest.csv")
+        st.dataframe(perf['trades'], use_container_width=True)
