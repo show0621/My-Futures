@@ -4,7 +4,6 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 from app.strategy import SignalService
 
@@ -16,16 +15,11 @@ if "service" not in st.session_state:
 
 service: SignalService = st.session_state.service
 
-col1, col2, col3 = st.columns([1, 1, 2])
+col1, col2 = st.columns([1, 3])
 with col1:
-    auto_refresh = st.toggle("自動更新（每60秒）", value=True)
-with col2:
     force = st.button("立即刷新")
-with col3:
+with col2:
     st.caption("規則：7天強平 / 停損10% / 動態追蹤停利")
-
-if auto_refresh:
-    st_autorefresh(interval=60_000, key="refresh_60s")
 
 try:
     payload = service.refresh() if force else service.get_latest()
