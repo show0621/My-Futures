@@ -28,6 +28,10 @@ def fetch_and_process_data():
     df['MACD'] = exp1 - exp2
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
+    # 🔥 定義精準進場扳機 (Trigger)：MACD 交叉
+    macd_cross_up = (df['MACD'] > df['Signal_Line']) & (df['MACD'].shift(1) <= df['Signal_Line'].shift(1))
+    macd_cross_dn = (df['MACD'] < df['Signal_Line']) & (df['MACD'].shift(1) >= df['Signal_Line'].shift(1))
+    
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -38,12 +42,11 @@ def fetch_and_process_data():
     df['Exit_Price'] = df['Close'].shift(-5)
     
     # -------------------------
-    # 2. 舊版基礎策略 (MACD)
+    # 2. 舊版基礎策略 (單純依賴 MACD)
     # -------------------------
-    # 基礎波段
     df['Signal_Dir'] = 0
-    df.loc[(df['Close'] > df['SMA_100']) & (df['MACD'] > df['Signal_Line']) & (df['MACD'].shift(1) <= df['Signal_Line'].shift(1)) & valid_volume, 'Signal_Dir'] = 1
-    df.loc[(df['Close'] < df['SMA_100']) & (df['MACD'] < df['Signal_Line']) & (df['MACD'].shift(1) >= df['Signal_Line'].shift(1)) & valid_volume, 'Signal_Dir'] = -1
+    df.loc[(df['Close'] > df['SMA_100']) & macd_cross_up & valid_volume, 'Signal_Dir'] = 1
+    df.loc[(df['Close'] < df['SMA_100']) & macd_cross_dn & valid_volume, 'Signal_Dir'] = -1
     df['Pos_Dir'] = np.floor(100 / df['ATR']).clip(lower=1, upper=3)
     df['Dir_Points'] = np.where(df['Signal_Dir'] == 1, df['Exit_Price'] - df['Entry_Price'], np.where(df['Signal_Dir'] == -1, df['Entry_Price'] - df['Exit_Price'], 0))
     df['Dir_PnL_TWD'] = np.where(df['Signal_Dir'] != 0, (df['Dir_Points'] * 0.5 * 50 * df['Pos_Dir']) - (100 * df['Pos_Dir']), 0)
@@ -57,20 +60,20 @@ def fetch_and_process_data():
     df['IB_PnL_TWD'] = np.where(df['Signal_IB'] != 0, (ib_points * 50 * df['Pos_IB']) - (100 * df['Pos_IB']), 0)
 
     # -------------------------
-    # 3. 法人三層式架構 (YZ波動率 + 動能)
+    # 3. 法人三層式架構 (YZ波動率 + 動能濾網 + 交叉扳機)
     # -------------------------
-    # 第一層：Yang-Zhang 波動率 (簡化版適用於Pandas)
-    log_ho = np.log(df['High'] / df['Open'])
-    log_lo = np.log(df['Low'] / df['Open'])
-    log_co = np.log(df['Close'] / df['Open'])
-    log_oc = np.log(df['Open'] / df['Close'].shift(1))
+    # 第一層：Yang-Zhang 波動率
+    log_ho = np.log(df['High'] / df['Open']).replace([np.inf, -np.inf], 0)
+    log_lo = np.log(df['Low'] / df['Open']).replace([np.inf, -np.inf], 0)
+    log_co = np.log(df['Close'] / df['Open']).replace([np.inf, -np.inf], 0)
+    log_oc = np.log(df['Open'] / df['Close'].shift(1)).replace([np.inf, -np.inf], 0)
     rs_var = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
     yz_var = log_oc.rolling(20).var() + 0.164 * log_co.rolling(20).var() + 0.836 * rs_var.rolling(20).mean()
-    # 轉換為年化波動率 (60K 級別一年約 1260 根)
     df['YZ_Vol'] = np.sqrt(yz_var) * np.sqrt(1260)
-    df['YZ_Vol'] = df['YZ_Vol'].replace(0, 0.01).fillna(0.15)
+    # 🔥 防呆：用前值填補 NaN，若還是空值則預設 15% 波動率
+    df['YZ_Vol'] = df['YZ_Vol'].replace([np.inf, -np.inf, 0], np.nan).fillna(method='bfill').fillna(0.15)
 
-    # 第二層：多重時間動能 (20日, 60日, 120日 -> 換算為 100, 300, 600 根 60K)
+    # 第二層：多重時間動能濾網 (換算為 100, 300, 600 根 60K)
     t1 = np.where(df['Close'] > df['Close'].shift(100), 1, -1)
     t2 = np.where(df['Close'] > df['Close'].shift(300), 1, -1)
     t3 = np.where(df['Close'] > df['Close'].shift(600), 1, -1)
@@ -78,22 +81,30 @@ def fetch_and_process_data():
 
     # 第三層：資金槓桿 (目標 30% 波動率)
     target_vol = 0.30
-    df['Risk_Leverage'] = target_vol / df['YZ_Vol']
+    df['Risk_Leverage'] = (target_vol / df['YZ_Vol']).replace([np.inf, -np.inf], 1).fillna(1)
 
-    # --- 三層式：買方多空策略 ---
-    # 動能 > 0.3 作多，< -0.3 作空 (滿足你多空皆做的要求)
-    df['Signal_3L_Dir'] = np.where(df['Composite_Score'] >= 0.33, 1, np.where(df['Composite_Score'] <= -0.33, -1, 0))
-    # 最終口數 = 基礎2口 * 風險槓桿 * 動能強度，上限 5 口
+    # --- 三層式：買方多空策略 (修復過度交易) ---
+    df['Signal_3L_Dir'] = 0
+    # 🔥 關鍵修復：必須同時滿足「MACD 剛交叉 (扳機)」且「趨勢分數吻合 (濾網)」才進場
+    df.loc[macd_cross_up & (df['Composite_Score'] >= 0.33) & valid_volume, 'Signal_3L_Dir'] = 1
+    df.loc[macd_cross_dn & (df['Composite_Score'] <= -0.33) & valid_volume, 'Signal_3L_Dir'] = -1
+    
     df['Pos_3L_Dir'] = np.floor(2 * df['Risk_Leverage'] * np.abs(df['Composite_Score'])).clip(0, 5)
     df['3L_Dir_Points'] = np.where(df['Signal_3L_Dir'] == 1, df['Exit_Price'] - df['Entry_Price'], np.where(df['Signal_3L_Dir'] == -1, df['Entry_Price'] - df['Exit_Price'], 0))
     df['3L_Dir_PnL_TWD'] = np.where(df['Signal_3L_Dir'] != 0, (df['3L_Dir_Points'] * 0.5 * 50 * df['Pos_3L_Dir']) - (100 * df['Pos_3L_Dir']), 0)
+    df['3L_Dir_PnL_TWD'] = df['3L_Dir_PnL_TWD'].fillna(0) # 確保絕對不會出現 NaN
 
     # --- 三層式：鐵蝴蝶中性策略 ---
-    # 動能在 -0.3 到 0.3 之間 (盤整)，且 YZ 波動率小於均值時進場
-    df['Signal_3L_IB'] = np.where((np.abs(df['Composite_Score']) < 0.33) & (df['YZ_Vol'] < df['YZ_Vol'].rolling(50).mean()), 1, 0)
-    # 盤整時動能弱，口數主要受低波動率的槓桿放大
+    df['Signal_3L_IB'] = 0
+    ib_trigger = (df['ATR'] > df['ATR'].rolling(20).mean()) & (np.abs(df['MACD']) < df['ATR'] * 0.1) & valid_volume
+    df.loc[ib_trigger & (df['Composite_Score'].abs() < 0.33) & (df['YZ_Vol'] < df['YZ_Vol'].rolling(50).mean()), 'Signal_3L_IB'] = 1
+    
     df['Pos_3L_IB'] = np.floor(2 * df['Risk_Leverage'] * (1 - np.abs(df['Composite_Score']))).clip(0, 5)
     df['3L_IB_PnL_TWD'] = np.where(df['Signal_3L_IB'] != 0, (ib_points * 50 * df['Pos_3L_IB']) - (100 * df['Pos_3L_IB']), 0)
+    df['3L_IB_PnL_TWD'] = df['3L_IB_PnL_TWD'].fillna(0) # 確保絕對不會出現 NaN
+
+    # 把前 100 根用來算均線導致數據不全的殘廢 K 棒剃除，讓圖表更乾淨
+    df.dropna(subset=['SMA_100'], inplace=True)
 
     # 儲存
     df.round(4).to_csv(FILE_PATH)
