@@ -16,49 +16,51 @@ def load_data():
 
 df = load_data()
 
-st.title("📈 台指選擇權 60K 全方位回測系統 (含法人三層式模型)")
+st.title("📈 台指選擇權全方位回測系統 (多策略實證版)")
 
 if df.empty:
     st.warning("⚠️ 尚未找到資料，請先執行 `update_data.py`。")
     st.stop()
 
 # -------------------------
-# 1. 雙層策略選擇區塊
+# 1. 策略選擇區塊
 # -------------------------
 st.sidebar.header("⚙️ 交易引擎設定")
 
 engine_choice = st.sidebar.selectbox(
     "1. 選擇決策大腦 (邏輯核心)",
-    ("基礎指標模型 (MACD/ATR)", "法人三層式模型 (動能/YZ波動率)")
+    ("法人 3L-Strict (0.33門檻)", "法人 3L-Relaxed (0門檻)", "MAD 均線距離策略", "基礎指標模型 (MACD/ATR)")
 )
 
-strategy_choice = st.sidebar.radio(
-    "2. 選擇操作策略 (買方/中性)",
+strategy_type = st.sidebar.radio(
+    "2. 選擇操作策略",
     ("方向波段 (買方 Long Call/Put)", "中性盤整 (鐵蝴蝶 Iron Butterfly)")
 )
 
-# 動態配置對應的欄位
-if engine_choice == "基礎指標模型 (MACD/ATR)":
-    if "方向波段" in strategy_choice:
-        signal_col, pnl_col, pos_col = 'Signal_Dir', 'Dir_PnL_TWD', 'Pos_Dir'
-        desc = "進場邏輯：MACD 交叉配合均線濾網。資金控管：依賴單純 ATR。"
-    else:
-        signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
-        desc = "進場邏輯：高波動且動能衰退時建倉。資金控管：依賴單純 ATR。"
+# 動態欄位映射
+if "3L-Strict" in engine_choice:
+    signal_col, pnl_col, pos_col = 'Signal_3L_Strict', '3L_Strict_PnL', 'Pos_3L_Strict'
+    desc = "法人嚴格版：僅在 20/60/120 日趨勢高度共振 (>= 0.33) 時執行 MACD 扳機。"
+elif "3L-Relaxed" in engine_choice:
+    signal_col, pnl_col, pos_col = 'Signal_3L_Relaxed', '3L_Relaxed_PnL', 'Pos_3L_Relaxed'
+    desc = "法人寬鬆版：只要長線趨勢為正 (> 0) 即允許 MACD 扳機進場，增加交易頻率。"
+elif "MAD" in engine_choice:
+    signal_col, pnl_col, pos_col = 'Signal_MAD', 'MAD_PnL', 'Pos_MAD'
+    desc = "MAD 策略：監控價格與 20MA 的距離。在長線看多下，捕捉過度乖離的回檔買點。"
 else:
-    if "方向波段" in strategy_choice:
-        signal_col, pnl_col, pos_col = 'Signal_3L_Dir', '3L_Dir_PnL_TWD', 'Pos_3L_Dir'
-        desc = "進場邏輯：20/60/120 多重時間框架共振。資金控管：目標 30% 波動率 + Yang-Zhang 槓桿縮放。"
-    else:
-        signal_col, pnl_col, pos_col = 'Signal_3L_IB', '3L_IB_PnL_TWD', 'Pos_3L_IB'
-        desc = "進場邏輯：趨勢分歧(死魚盤)且 YZ 波動率收斂時進場。資金控管：目標 30% 波動率放大槓桿。"
+    signal_col, pnl_col, pos_col = 'Signal_Dir', 'Dir_PnL_TWD', 'Pos_Dir'
+    desc = "基礎模型：單純以 MACD 交叉與 100MA 判斷方向。"
 
-st.header(f"當前執行：{engine_choice} - {strategy_choice}")
+# 若選擇鐵蝴蝶，則覆蓋欄位
+if "鐵蝴蝶" in strategy_type:
+    signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
+    desc = "中性策略：預期市場進入盤整。依據 ATR 自動調整蝴蝶翅膀範圍。"
+
+st.header(f"當前執行：{engine_choice}")
 st.caption(desc)
 
-# 🔥 防呆檢查機制
 if signal_col not in df.columns:
-    st.error(f"🚨 在資料中找不到 `{signal_col}` 欄位！請先到終端機執行 `python update_data.py` (或觸發 GitHub Actions) 產生最新資料。")
+    st.error(f"🚨 找不到 `{signal_col}` 欄位！請先執行更新程式。")
     st.stop()
 
 # -------------------------
@@ -86,13 +88,12 @@ col4.metric("策略夏普值", f"{sharpe:.2f}")
 col5.metric("累積總損益", f"NT$ {total_pnl:,.0f}")
 
 # -------------------------
-# 3. 繪製圖表
+# 3. 繪製圖表 (累積損益 & K線)
 # -------------------------
 st.subheader("💰 累積損益曲線")
 if len(trades) > 0:
     fig_pnl = go.Figure()
-    color = 'rgba(50, 205, 50, 0.8)' if '法人' in engine_choice else 'rgba(255, 165, 0, 0.8)'
-    fig_pnl.add_trace(go.Scatter(x=trades.index, y=trades['Cumulative_PnL'], mode='lines', fill='tozeroy', name='累積損益(TWD)', line=dict(color=color)))
+    fig_pnl.add_trace(go.Scatter(x=trades.index, y=trades['Cumulative_PnL'], mode='lines', fill='tozeroy', name='累積損益(TWD)'))
     fig_pnl.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig_pnl, use_container_width=True)
 
@@ -100,12 +101,9 @@ st.subheader("📊 近期進出場點位 (以開盤價進場)")
 plot_df = df.tail(300)
 fig_k = go.Figure(data=[go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name="60K K線")])
 
-buy_signals = plot_df[plot_df[signal_col] == 1]
-fig_k.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Entry_Price'], mode='markers+text', marker=dict(symbol='triangle-up', color='red', size=14), name='作多/建倉', text=buy_signals[pos_col].astype(int).astype(str) + " 口", textposition="bottom center"))
-
-sell_signals = plot_df[plot_df[signal_col] == -1]
-if len(sell_signals) > 0:
-    fig_k.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['Entry_Price'], mode='markers+text', marker=dict(symbol='triangle-down', color='green', size=14), name='放空', text=sell_signals[pos_col].astype(int).astype(str) + " 口", textposition="top center"))
+for s, c, name in [(1, 'red', '買入'), (-1, 'green', '賣出')]:
+    sigs = plot_df[plot_df[signal_col] == s]
+    fig_k.add_trace(go.Scatter(x=sigs.index, y=sigs['Entry_Price'], mode='markers+text', marker=dict(symbol='triangle-up' if s==1 else 'triangle-down', color=c, size=14), name=name, text=sigs[pos_col].astype(int).astype(str) + " 口", textposition="bottom center"))
 
 fig_k.update_layout(height=500, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig_k, use_container_width=True)
@@ -114,14 +112,7 @@ st.plotly_chart(fig_k, use_container_width=True)
 # 4. 交易明細
 # -------------------------
 st.subheader("📋 交易紀錄明細")
-
-# 若選擇法人引擎，則多顯示 YZ_Vol 與 Composite_Score 讓你看清楚模型如何運作
-if "法人" in engine_choice:
-    display_cols = ['Close', 'YZ_Vol', 'Composite_Score', 'Risk_Leverage', signal_col, pos_col, pnl_col, 'Cumulative_PnL']
-else:
-    display_cols = ['Close', 'ATR', signal_col, pos_col, pnl_col, 'Cumulative_PnL']
-
-if not trades.empty:
-    st.dataframe(trades[display_cols].sort_index(ascending=False).style.format({
-        'Close': '{:.0f}', 'ATR': '{:.2f}', 'YZ_Vol': '{:.2%}', 'Composite_Score': '{:.2f}', 'Risk_Leverage': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
-    }))
+cols = ['Close', 'YZ_Vol', 'Composite_Score', 'MAD_Value', signal_col, pos_col, pnl_col, 'Cumulative_PnL']
+st.dataframe(trades[cols].sort_index(ascending=False).style.format({
+    'Close': '{:.0f}', 'YZ_Vol': '{:.2%}', 'Composite_Score': '{:.2f}', 'MAD_Value': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
+}))
