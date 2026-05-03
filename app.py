@@ -37,7 +37,7 @@ strategy_type = st.sidebar.radio(
     ("方向波段 (買方 Long Call/Put 多空雙向)", "中性盤整 (鐵蝴蝶 Iron Butterfly)")
 )
 
-# 🔥 關鍵映射：必須與後端欄位完全一致
+# 根據選單設定對應的欄位名稱
 if "3L-Strict" in engine_choice:
     signal_col, pnl_col, pos_col = 'Signal_3L_Strict', '3L_Strict_PnL_TWD', 'Pos_3L_Strict'
 elif "3L-Relaxed" in engine_choice:
@@ -47,19 +47,25 @@ elif "MAD" in engine_choice:
 else:
     signal_col, pnl_col, pos_col = 'Signal_Dir', 'Dir_PnL_TWD', 'Pos_Dir'
 
+# 鐵蝴蝶覆蓋
 if "鐵蝴蝶" in strategy_type:
     signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
 
-# 防呆檢查
+# 再次檢查欄位是否存在
 if signal_col not in df.columns:
-    st.error(f"🚨 找不到 `{signal_col}` 欄位！請先執行 `update_data.py`")
+    st.error(f"🚨 找不到 `{signal_col}` 欄位！請先在 GitHub 手動執行 `Run workflow` 更新資料。")
     st.stop()
 
 # -------------------------
-# 2. 核心績效計算 (KeyError 發生處已修正)
+# 2. 核心績效計算
 # -------------------------
 trades = df[df[signal_col] != 0].copy()
-trade_results = trades[pnl_col].dropna() # 修正後的映射會解決 KeyError
+# 確保 pnl_col 不會導致 KeyError
+if pnl_col not in trades.columns:
+    st.error(f"🚨 找不到損益欄位 `{pnl_col}`，請檢查 CSV 是否為最新版本。")
+    st.stop()
+
+trade_results = trades[pnl_col].dropna()
 
 if len(trade_results) > 0:
     win_rate = (len(trade_results[trade_results > 0]) / len(trade_results)) * 100
@@ -72,11 +78,7 @@ else:
     win_rate = ev = sharpe = total_pnl = 0
     trades['Cumulative_PnL'] = 0
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("總交易次數", f"{len(trade_results)} 次")
-col2.metric("策略勝率", f"{win_rate:.2f}%")
-col3.metric("單筆期望值", f"NT$ {ev:.0f}")
-col4.metric("策略夏普值", f"{sharpe:.2f}")
-col5.metric("累積總損益", f"NT$ {total_pnl:,.0f}")
-
-# ... (後續繪圖與明細代碼同前) ...
+# -------------------------
+# 3. 圖表與明細 (省略重複繪圖代碼)
+# -------------------------
+# ... 同前版本 ...
