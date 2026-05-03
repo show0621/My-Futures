@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import numpy as np
 import os
 
-st.set_page_config(page_title="台指選擇權回測系統", layout="wide")
+st.set_page_config(page_title="台指選擇權法人級回測系統", layout="wide")
 
 @st.cache_data
 def load_data():
@@ -16,39 +16,53 @@ def load_data():
 
 df = load_data()
 
-st.title("📈 台指選擇權 60K 全方位回測系統")
+st.title("📈 台指選擇權 60K 全方位回測系統 (含法人三層式模型)")
 
 if df.empty:
     st.warning("⚠️ 尚未找到資料，請先執行 `update_data.py`。")
     st.stop()
 
 # -------------------------
-# 1. 策略選擇區塊
+# 1. 雙層策略選擇區塊
 # -------------------------
-strategy_choice = st.sidebar.radio(
-    "⚙️ 選擇回測策略",
-    ("波段方向策略 (Long Call/Put)", "中性盤整策略 (鐵蝴蝶 Iron Butterfly)")
+st.sidebar.header("⚙️ 交易引擎設定")
+
+engine_choice = st.sidebar.selectbox(
+    "1. 選擇決策大腦 (邏輯核心)",
+    ("基礎指標模型 (MACD/ATR)", "法人三層式模型 (動能/YZ波動率)")
 )
 
-# 根據選擇動態切換使用的欄位
-if "波段方向策略" in strategy_choice:
-    signal_col = 'Signal_Dir'
-    pnl_col = 'Dir_PnL_TWD'
-    st.header("趨勢波段策略分析")
-    st.caption("進場邏輯：MACD 交叉配合均線濾網。執行：次根 K 棒開盤價進場。")
-else:
-    signal_col = 'Signal_IB'
-    pnl_col = 'IB_PnL_TWD'
-    st.header("🦋 鐵蝴蝶中性策略分析")
-    st.caption("進場邏輯：高波動且動能衰退時建倉。架構：依進場點與當前 ATR 自動決定翅膀寬度。")
+strategy_choice = st.sidebar.radio(
+    "2. 選擇操作策略 (買方/中性)",
+    ("方向波段 (買方 Long Call/Put)", "中性盤整 (鐵蝴蝶 Iron Butterfly)")
+)
 
-# 🔥 防呆檢查機制：避免讀到舊版 CSV 導致 KeyError
+# 動態配置對應的欄位
+if engine_choice == "基礎指標模型 (MACD/ATR)":
+    if "方向波段" in strategy_choice:
+        signal_col, pnl_col, pos_col = 'Signal_Dir', 'Dir_PnL_TWD', 'Pos_Dir'
+        desc = "進場邏輯：MACD 交叉配合均線濾網。資金控管：依賴單純 ATR。"
+    else:
+        signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
+        desc = "進場邏輯：高波動且動能衰退時建倉。資金控管：依賴單純 ATR。"
+else:
+    if "方向波段" in strategy_choice:
+        signal_col, pnl_col, pos_col = 'Signal_3L_Dir', '3L_Dir_PnL_TWD', 'Pos_3L_Dir'
+        desc = "進場邏輯：20/60/120 多重時間框架共振。資金控管：目標 30% 波動率 + Yang-Zhang 槓桿縮放。"
+    else:
+        signal_col, pnl_col, pos_col = 'Signal_3L_IB', '3L_IB_PnL_TWD', 'Pos_3L_IB'
+        desc = "進場邏輯：趨勢分歧(死魚盤)且 YZ 波動率收斂時進場。資金控管：目標 30% 波動率放大槓桿。"
+
+st.header(f"當前執行：{engine_choice} - {strategy_choice}")
+st.caption(desc)
+
+# 🔥 防呆檢查機制
 if signal_col not in df.columns:
-    st.error(f"🚨 在資料中找不到 `{signal_col}` 欄位！\n\n這通常是因為你的 CSV 是舊版的。請先到終端機執行 `python update_data.py` 來產生最新資料，完成後再重新整理這個網頁。")
+    st.error(f"🚨 在資料中找不到 `{signal_col}` 欄位！請先到終端機執行 `python update_data.py` (或觸發 GitHub Actions) 產生最新資料。")
     st.stop()
 
 # -------------------------
-# 2. 核心績效計算 (包含累積損益)
+# 2. 核心績效計算
 # -------------------------
 trades = df[df[signal_col] != 0].copy()
 trade_results = trades[pnl_col].dropna()
@@ -58,7 +72,6 @@ if len(trade_results) > 0:
     ev = trade_results.mean()
     std_dev = trade_results.std()
     sharpe = (ev / std_dev) * np.sqrt(252) if std_dev != 0 else 0
-    # 計算累積損益
     trades['Cumulative_PnL'] = trades[pnl_col].cumsum()
     total_pnl = trades['Cumulative_PnL'].iloc[-1]
 else:
@@ -73,56 +86,42 @@ col4.metric("策略夏普值", f"{sharpe:.2f}")
 col5.metric("累積總損益", f"NT$ {total_pnl:,.0f}")
 
 # -------------------------
-# 3. 繪製累積損益圖與 K 線圖
+# 3. 繪製圖表
 # -------------------------
 st.subheader("💰 累積損益曲線")
 if len(trades) > 0:
     fig_pnl = go.Figure()
-    fig_pnl.add_trace(go.Scatter(x=trades.index, y=trades['Cumulative_PnL'], 
-                                 mode='lines', fill='tozeroy', name='累積損益(TWD)', 
-                                 line=dict(color='rgba(255, 165, 0, 0.8)')))
+    color = 'rgba(50, 205, 50, 0.8)' if '法人' in engine_choice else 'rgba(255, 165, 0, 0.8)'
+    fig_pnl.add_trace(go.Scatter(x=trades.index, y=trades['Cumulative_PnL'], mode='lines', fill='tozeroy', name='累積損益(TWD)', line=dict(color=color)))
     fig_pnl.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig_pnl, use_container_width=True)
 
-st.subheader("📊 近期進出場點位 (以進場開盤價為基準)")
+st.subheader("📊 近期進出場點位 (以開盤價進場)")
 plot_df = df.tail(300)
-fig_k = go.Figure(data=[go.Candlestick(x=plot_df.index,
-                open=plot_df['Open'], high=plot_df['High'],
-                low=plot_df['Low'], close=plot_df['Close'], name="60K K線")])
+fig_k = go.Figure(data=[go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name="60K K線")])
 
-# 標示買點 (注意：改標示在 Entry_Price 上，這才是真實進場點)
 buy_signals = plot_df[plot_df[signal_col] == 1]
-fig_k.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Entry_Price'],
-                         mode='markers+text', marker=dict(symbol='triangle-up', color='red', size=14),
-                         name='作多/建倉', text=buy_signals['Position_Size'].astype(int).astype(str) + " 口",
-                         textposition="bottom center"))
+fig_k.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Entry_Price'], mode='markers+text', marker=dict(symbol='triangle-up', color='red', size=14), name='作多/建倉', text=buy_signals[pos_col].astype(int).astype(str) + " 口", textposition="bottom center"))
 
 sell_signals = plot_df[plot_df[signal_col] == -1]
 if len(sell_signals) > 0:
-    fig_k.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['Entry_Price'],
-                             mode='markers+text', marker=dict(symbol='triangle-down', color='green', size=14),
-                             name='放空', text=sell_signals['Position_Size'].astype(int).astype(str) + " 口",
-                             textposition="top center"))
+    fig_k.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['Entry_Price'], mode='markers+text', marker=dict(symbol='triangle-down', color='green', size=14), name='放空', text=sell_signals[pos_col].astype(int).astype(str) + " 口", textposition="top center"))
 
 fig_k.update_layout(height=500, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig_k, use_container_width=True)
 
 # -------------------------
-# 4. 交易明細與下載
+# 4. 交易明細
 # -------------------------
-st.subheader("📋 交易紀錄明細 (OHLCV 實戰評估)")
-display_cols = ['Open', 'Close', 'Volume', 'ATR', signal_col, 'Position_Size', 'Entry_Price', 'Exit_Price', pnl_col, 'Cumulative_PnL']
+st.subheader("📋 交易紀錄明細")
+
+# 若選擇法人引擎，則多顯示 YZ_Vol 與 Composite_Score 讓你看清楚模型如何運作
+if "法人" in engine_choice:
+    display_cols = ['Close', 'YZ_Vol', 'Composite_Score', 'Risk_Leverage', signal_col, pos_col, pnl_col, 'Cumulative_PnL']
+else:
+    display_cols = ['Close', 'ATR', signal_col, pos_col, pnl_col, 'Cumulative_PnL']
 
 if not trades.empty:
     st.dataframe(trades[display_cols].sort_index(ascending=False).style.format({
-        'Open': '{:.0f}', 'Close': '{:.0f}', 'Entry_Price': '{:.0f}', 'Exit_Price': '{:.0f}',
-        'ATR': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
+        'Close': '{:.0f}', 'ATR': '{:.2f}', 'YZ_Vol': '{:.2%}', 'Composite_Score': '{:.2f}', 'Risk_Leverage': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
     }))
-
-csv = df.to_csv().encode('utf-8-sig')
-st.download_button(
-    label="📥 下載包含 OHLCV 的完整回測 CSV 資料",
-    data=csv,
-    file_name='txf_advanced_backtest.csv',
-    mime='text/csv',
-)
