@@ -8,40 +8,38 @@ os.makedirs(DATA_DIR, exist_ok=True)
 FILE_PATH = os.path.join(DATA_DIR, "txf_options_backtest.csv")
 
 def fetch_and_process_data():
-    print("正在抓取 5 年期 60K 數據並執行複合策略計算...")
-    # 抓取 5 年數據，interval 為 1h (60K)
+    print("🚀 開始抓取數據...")
     df = yf.download("^TWII", period="5y", interval="1h")
     
     if df.empty:
-        print("無法取得資料。")
+        print("❌ 抓取失敗")
         return
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
     df.dropna(inplace=True)
 
-    # 1. 基礎指標計算
+    # 指標運算
     df['SMA_100'] = df['Close'].rolling(100).mean()
     df['SMA_20'] = df['Close'].rolling(20).mean()
     df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
     df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
     df['Signal_Line'] = df['MACD'].ewm(span=9).mean()
     
-    # 2. 趨勢信心分數 (Composite_Score)
+    # 趨勢分數
     t1 = np.where(df['Close'] > df['Close'].shift(100), 1, -1)
     t2 = np.where(df['Close'] > df['Close'].shift(300), 1, -1)
     t3 = np.where(df['Close'] > df['Close'].shift(600), 1, -1)
     df['Composite_Score'] = (t1 + t2 + t3) / 3
     
-    # 3. 波動率與進出場
-    log_co = np.log(df['Close'] / df['Open']).replace([np.inf, -np.inf], 0)
-    df['YZ_Vol'] = (np.sqrt(log_co.rolling(20).var()) * np.sqrt(1260)).fillna(0.15)
+    # 進出場設定
+    df['YZ_Vol'] = (np.sqrt(np.log(df['Close']/df['Open']).rolling(20).var()) * np.sqrt(1260)).fillna(0.15)
     df['Risk_Leverage'] = (0.30 / df['YZ_Vol']).clip(0.5, 3.0)
     df['Entry_Price'] = df['Open'].shift(-1)
     df['Exit_Price_10d'] = df['Close'].shift(-50)
     df['Exit_Price_7d'] = df['Close'].shift(-35)
 
-    # 4. 生成大腦訊號
+    # 大腦訊號
     m_up = (df['MACD'] > df['Signal_Line']) & (df['MACD'].shift(1) <= df['Signal_Line'].shift(1))
     m_dn = (df['MACD'] < df['Signal_Line']) & (df['MACD'].shift(1) >= df['Signal_Line'].shift(1))
     
@@ -53,42 +51,32 @@ def fetch_and_process_data():
     df.loc[(df['MAD_Value'] < 1.5) & (df['MAD_Value'].shift(1) >= 1.5) & (df['Composite_Score'] < 0), 'Signal_MAD'] = -1
     df['Signal_Dir'] = np.where(m_up & (df['Close'] > df['SMA_100']), 1, np.where(m_dn & (df['Close'] < df['SMA_100']), -1, 0))
 
-    # 5. 統一執行損益循環 (關鍵：名稱對齊)
-    brain_list = [('3L_Strict', 'Signal_3L_Strict'), ('3L_Relaxed', 'Signal_3L_Relaxed'), ('MAD', 'Signal_MAD'), ('Dir', 'Signal_Dir')]
-    
-    for brain_name, sig_col in brain_list:
+    # 損益循環：嚴格對齊前綴
+    for brain in ['3L_Strict', '3L_Relaxed', 'MAD', 'Dir']:
+        sig = f'Signal_{brain}'
         pos = np.floor(2 * df['Risk_Leverage']).clip(1, 5)
-        df[f'Pos_{brain_name}'] = pos
+        df[f'Pos_{brain}'] = pos
         
-        # 標的點數變動
-        pts_10 = np.where(df[sig_col] == 1, df['Exit_Price_10d'] - df['Entry_Price'], np.where(df[sig_col] == -1, df['Entry_Price'] - df['Exit_Price'], 0))
-        pts_7 = np.where(df[sig_col] == 1, df['Exit_Price_7d'] - df['Entry_Price'], np.where(df[sig_col] == -1, df['Entry_Price'] - df['Exit_Price'], 0))
+        pts_10 = np.where(df[sig] == 1, df['Exit_Price_10d'] - df['Entry_Price'], np.where(df[sig] == -1, df['Entry_Price'] - df['Exit_Price'], 0))
+        pts_7 = np.where(df[sig] == 1, df['Exit_Price_7d'] - df['Entry_Price'], np.where(df[sig] == -1, df['Entry_Price'] - df['Exit_Price'], 0))
         
-        # ATR 風控點數 (RM 版本：7天強制平倉 + ATR 停損停利)
+        # RM 風控
         tp, sl = df['ATR'] * 2.0, df['ATR'] * 1.0
         pts_rm = np.where(pts_7 >= tp, tp, np.where(pts_7 <= -sl, -sl, pts_7))
 
-        # A. 原始版 (10天)
-        df[f'{brain_name}_Micro_PnL_TWD'] = (pts_10 * 10 * pos) - (50 * pos)
-        df[f'{brain_name}_Seller_PnL_TWD'] = ((pts_10 + 100) * 10 * pos) - (100 * pos)
-        df[f'{brain_name}_Buy_PnL_TWD'] = (pts_10 * 0.5 * 50 * pos) - (500 * pos)
-        df[f'{brain_name}_Spread_PnL_TWD'] = (pts_10 * 0.25 * 50 * pos) - (200 * pos)
-
-        # B. 風控版 (RM)
-        df[f'{brain_name}_Micro_RM_PnL_TWD'] = (pts_rm * 10 * pos) - (50 * pos)
-        df[f'{brain_name}_Seller_RM_PnL_TWD'] = ((pts_rm + 70) * 10 * pos) - (100 * pos)
-        df[f'{brain_name}_Buy_RM_PnL_TWD'] = (pts_rm * 0.5 * 50 * pos) - (350 * pos)
-        df[f'{brain_name}_Spread_RM_PnL_TWD'] = (pts_rm * 0.25 * 50 * pos) - (150 * pos)
-
-    # 6. 鐵蝴蝶獨立計算
-    df['Signal_IB'] = 0
-    df.loc[(df['ATR'] > df['ATR'].rolling(20).mean()) & (np.abs(df['MACD']) < df['ATR'] * 0.1), 'Signal_IB'] = 1
-    df['Pos_IB'] = 2
-    ib_pts = (0.4 * df['ATR'] - np.abs(df['Exit_Price_10d'] - df['Entry_Price'])).clip(lower=-0.6*df['ATR'])
-    df['IB_PnL_TWD'] = (ib_pts * 50 * 2) - 200
+        # 寫入各欄位 (確保名稱與 app.py 的映射完全一致)
+        df[f'{brain}_Micro_PnL_TWD'] = (pts_10 * 10 * pos) - (50 * pos)
+        df[f'{brain}_Micro_RM_PnL_TWD'] = (pts_rm * 10 * pos) - (50 * pos)
+        df[f'{brain}_Buy_PnL_TWD'] = (pts_10 * 0.5 * 50 * pos) - (500 * pos)
+        df[f'{brain}_Buy_RM_PnL_TWD'] = (pts_rm * 0.5 * 50 * pos) - (350 * pos)
+        df[f'{brain}_Seller_PnL_TWD'] = ((pts_10 + 100) * 10 * pos) - (100 * pos)
+        df[f'{brain}_Seller_RM_PnL_TWD'] = ((pts_rm + 70) * 10 * pos) - (100 * pos)
+        df[f'{brain}_Spread_PnL_TWD'] = (pts_10 * 0.25 * 50 * pos) - (200 * pos)
+        df[f'{brain}_Spread_RM_PnL_TWD'] = (pts_rm * 0.25 * 50 * pos) - (150 * pos)
 
     df.fillna(0).to_csv(FILE_PATH)
-    print("CSV 檔案已成功更新，包含所有複合策略欄位。")
+    print("✅ CSV 更新成功！目前包含欄位：")
+    print(df.columns.tolist())
 
 if __name__ == "__main__":
     fetch_and_process_data()
