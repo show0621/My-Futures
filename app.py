@@ -37,8 +37,18 @@ min_date_limit = max_date - timedelta(days=5*365)
 start_date = st.sidebar.date_input("選擇回測開始日期", value=max_date - timedelta(days=365), min_value=min_date_limit.date(), max_value=max_date.date())
 end_date = st.sidebar.date_input("選擇回測結束日期", value=max_date.date(), min_value=min_date_limit.date(), max_value=max_date.date())
 
+# --- 修復 TypeError: 時區對齊處理 ---
+# 將 date 物件轉為 Timestamp
+ts_start = pd.Timestamp(start_date)
+ts_end = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59) # 包含結束當天
+
+# 檢查原始資料是否有時區資訊，若有則將搜尋條件對齊時區
+if raw_df.index.tz is not None:
+    ts_start = ts_start.tz_localize(raw_df.index.tz)
+    ts_end = ts_end.tz_localize(raw_df.index.tz)
+
 # 根據日期篩選資料
-df = raw_df.loc[start_date:end_date].copy()
+df = raw_df.loc[ts_start:ts_end].copy()
 
 engine_choice = st.sidebar.selectbox(
     "1. 選擇決策大腦 (趨勢邏輯)",
@@ -92,38 +102,42 @@ else:
     tool_desc = "【中性鐵蝴蝶】"
 
 # -------------------------
-# 2. 即時診斷與操作建議 (新增區塊)
+# 2. 即時診斷與操作建議
 # -------------------------
 st.header("🔍 即時診斷與目前操作建議")
-last_row = df.iloc[-1]
-prev_row = df.iloc[-2]
-score = last_row.get('Composite_Score', 0)
-prev_score = prev_row.get('Composite_Score', 0)
 
-# A. 盤感診斷邏輯
-if score >= 0.66: diag = "🔥 多頭持續 (強勁趨勢)"
-elif score > 0 and prev_score <= 0: diag = "🚀 多頭開始 (趨勢發動)"
-elif score > 0 and score < prev_score: diag = "⚠️ 多頭勢歇 (動能減弱)"
-elif score <= -0.66: diag = "❄️ 空頭持續 (強勁趨勢)"
-elif score < 0 and prev_score >= 0: diag = "📉 空頭開始 (起跌確認)"
-elif score < 0 and score > prev_score: diag = "🩹 空頭勢歇 (跌勢趨緩)"
-elif score == 0 and prev_score != 0: diag = "🧱 進入盤整 (動能消失)"
-else: diag = "🔄 盤整持續"
+if not df.empty:
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2] if len(df) > 1 else last_row
+    score = last_row.get('Composite_Score', 0)
+    prev_score = prev_row.get('Composite_Score', 0)
 
-# B. 壓力與支撐 (取近期 100 根 K 線高低點)
-support = df['Low'].tail(100).min()
-resistance = df['High'].tail(100).max()
+    # A. 盤感診斷邏輯
+    if score >= 0.66: diag = "🔥 多頭持續 (強勁趨勢)"
+    elif score > 0 and prev_score <= 0: diag = "🚀 多頭開始 (趨勢發動)"
+    elif score > 0 and score < prev_score: diag = "⚠️ 多頭勢歇 (動能減弱)"
+    elif score <= -0.66: diag = "❄️ 空頭持續 (強勁趨勢)"
+    elif score < 0 and prev_score >= 0: diag = "📉 空頭開始 (起跌確認)"
+    elif score < 0 and score > prev_score: diag = "🩹 空頭勢歇 (跌勢趨緩)"
+    elif score == 0 and prev_score != 0: diag = "🧱 進入盤整 (動能消失)"
+    else: diag = "🔄 盤整持續"
 
-# C. 操作建議
-suggested_pos = int(last_row.get(pos_col, 0)) if last_row.get(signal_col, 0) != 0 else 0
+    # B. 壓力與支撐 (取近期 100 根 K 線高低點)
+    support = df['Low'].tail(100).min()
+    resistance = df['High'].tail(100).max()
 
-diag_col1, diag_col2, diag_col3 = st.columns(3)
-diag_col1.metric("當前盤勢診斷", diag)
-diag_col2.metric("關鍵支撐 / 壓力", f"{support:.0f} / {resistance:.0f}")
-diag_col3.metric("目前建議口數", f"{suggested_pos} 口" if suggested_pos > 0 else "觀望")
+    # C. 操作建議
+    suggested_pos = int(last_row.get(pos_col, 0)) if last_row.get(signal_col, 0) != 0 else 0
+
+    diag_col1, diag_col2, diag_col3 = st.columns(3)
+    diag_col1.metric("當前盤勢診斷", diag)
+    diag_col2.metric("關鍵支撐 / 壓力", f"{support:.0f} / {resistance:.0f}")
+    diag_col3.metric("目前建議口數", f"{suggested_pos} 口" if suggested_pos > 0 else "觀望")
+else:
+    st.info("所選期間內無資料可供診斷。")
 
 # -------------------------
-# 3. 核心績效計算 (新增 MDD)
+# 3. 核心績效計算 (含 MDD)
 # -------------------------
 if signal_col not in df.columns or pnl_col not in df.columns:
     st.error(f"🚨 找不到對應欄位。請確保 CSV 已更新。")
@@ -140,7 +154,7 @@ if len(trade_results) > 0:
     trades['Cumulative_PnL'] = trades[pnl_col].cumsum()
     total_pnl = trades['Cumulative_PnL'].iloc[-1]
     
-    # 新增：MDD 計算
+    # MDD 計算
     cum_pnl = trades['Cumulative_PnL']
     running_max = cum_pnl.cummax()
     drawdown = cum_pnl - running_max
@@ -169,19 +183,20 @@ if len(trades) > 0:
 
 st.subheader("📊 近期進出場點位標示 (含支撐壓力)")
 plot_df = df.tail(300)
-fig_k = go.Figure(data=[go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name="台指K線")])
+if not plot_df.empty:
+    fig_k = go.Figure(data=[go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name="台指K線")])
 
-# 畫支撐壓力線
-fig_k.add_hline(y=support, line_dash="dash", line_color="green", annotation_text="支撐線")
-fig_k.add_hline(y=resistance, line_dash="dash", line_color="red", annotation_text="壓力線")
+    # 畫支撐壓力線
+    fig_k.add_hline(y=support, line_dash="dash", line_color="green", annotation_text="支撐線")
+    fig_k.add_hline(y=resistance, line_dash="dash", line_color="red", annotation_text="壓力線")
 
-for s, c, name, sym in [(1, 'red', '多頭佈局', 'triangle-up'), (-1, 'green', '空頭佈局', 'triangle-down')]:
-    sigs = plot_df[plot_df[signal_col] == s]
-    if not sigs.empty:
-        fig_k.add_trace(go.Scatter(x=sigs.index, y=sigs['Entry_Price'], mode='markers+text', marker=dict(symbol=sym, color=c, size=14), name=name, text=sigs[pos_col].astype(int).astype(str) + " 組"))
+    for s, c, name, sym in [(1, 'red', '多頭佈局', 'triangle-up'), (-1, 'green', '空頭佈局', 'triangle-down')]:
+        sigs = plot_df[plot_df[signal_col] == s]
+        if not sigs.empty:
+            fig_k.add_trace(go.Scatter(x=sigs.index, y=sigs['Entry_Price'], mode='markers+text', marker=dict(symbol=sym, color=c, size=14), name=name, text=sigs[pos_col].astype(int).astype(str) + " 組"))
 
-fig_k.update_layout(height=550, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig_k, use_container_width=True)
+    fig_k.update_layout(height=550, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig_k, use_container_width=True)
 
 # -------------------------
 # 5. 交易明細紀錄 (保留原本欄位)
@@ -189,8 +204,11 @@ st.plotly_chart(fig_k, use_container_width=True)
 st.subheader("📋 交易紀錄與多空實證明細")
 display_cols = ['Close', 'YZ_Vol', 'Composite_Score', 'MAD_Value', signal_col, pos_col, pnl_col, 'Cumulative_PnL']
 
+# 過濾出 CSV 中實際存在的欄位，避免顯示錯誤
+actual_cols = [c for c in display_cols if c in trades.columns]
+
 if not trades.empty:
-    st.dataframe(trades[display_cols].sort_index(ascending=False).style.format({
+    st.dataframe(trades[actual_cols].sort_index(ascending=False).style.format({
         'Close': '{:.0f}', 'YZ_Vol': '{:.2%}', 'Composite_Score': '{:.2f}', 'MAD_Value': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
     }))
 
