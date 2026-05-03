@@ -42,6 +42,11 @@ else:
     st.header("🦋 鐵蝴蝶中性策略分析")
     st.caption("進場邏輯：高波動且動能衰退時建倉。架構：依進場點與當前 ATR 自動決定翅膀寬度。")
 
+# 🔥 防呆檢查機制：避免讀到舊版 CSV 導致 KeyError
+if signal_col not in df.columns:
+    st.error(f"🚨 在資料中找不到 `{signal_col}` 欄位！\n\n這通常是因為你的 CSV 是舊版的。請先到終端機執行 `python update_data.py` 來產生最新資料，完成後再重新整理這個網頁。")
+    st.stop()
+
 # -------------------------
 # 2. 核心績效計算 (包含累積損益)
 # -------------------------
