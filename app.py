@@ -5,69 +5,69 @@ import numpy as np
 import os
 from datetime import datetime, timedelta
 
-# 設定網頁標題與寬度
+# --- 最高指導原則：保留既存功能與框架，確保專業視覺與診斷代碼 ---
 st.set_page_config(page_title="台指全方位量化回測系統", layout="wide")
 
-# --- 錯誤診斷系統 ---
+# [功能] 錯誤診斷代碼映射
 ERROR_MAP = {
-    "ERR-101": "檔案缺失 (data/txf_options_backtest.csv)",
-    "ERR-202": "欄位對接失敗 (Signal 或 PnL 欄位未產出)",
-    "ERR-303": "日期範圍無資料 (請檢查回測期間設定)",
-    "ERR-404": "資料索引格式錯誤 (時區不相容)"
+    "ERR-101": "資料庫檔案缺失 (CSV not found)",
+    "ERR-202": "策略欄位映射失敗 (Column missing)",
+    "ERR-303": "目前區間無交易訊號 (No trades)",
+    "ERR-404": "時區或索引格式異常 (Index error)"
 }
 
 @st.cache_data(ttl=300)
 def load_data():
     file_path = "data/txf_options_backtest.csv"
     if os.path.exists(file_path):
-        # 讀取時確保日期格式正確
         df = pd.read_csv(file_path, index_col=0, parse_dates=True)
         return df, None
     return pd.DataFrame(), "ERR-101"
 
 raw_df, init_err = load_data()
 
-st.title("📈 台指期權量化回測系統 (專業視覺增強版)")
+st.title("📈 台指期權量化回測系統 (全功能專業版)")
 
 # -------------------------
-# 1. 策略與期間設定 (側邊欄)
+# 1. 側邊欄設定 (完整功能框架)
 # -------------------------
-st.sidebar.header("⚙️ 引擎與期間")
+st.sidebar.header("⚙️ 交易引擎與期間設定")
+
 if init_err:
     st.error(f"🚨 系統錯誤: {init_err} ({ERROR_MAP[init_err]})")
     st.stop()
 
-# 取得資料範圍進行連動
+# [功能] 5年期間選擇邏輯
 max_date = raw_df.index.max()
-start_date = st.sidebar.date_input("回測開始日期", value=max_date - timedelta(days=365))
-end_date = st.sidebar.date_input("回測結束日期", value=max_date)
+min_date_limit = max_date - timedelta(days=5*365)
+start_date = st.sidebar.date_input("回測開始日期", value=max_date - timedelta(days=365), min_value=min_date_limit.date(), max_value=max_date.date())
+end_date = st.sidebar.date_input("回測結束日期", value=max_date.date(), min_value=min_date_limit.date(), max_value=max_date.date())
 
-# --- 修復時區與切片問題 ---
+# --- 修復時區與切片 ---
 ts_start = pd.Timestamp(start_date)
 ts_end = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59)
-
-# 針對 yfinance 常見時區進行自動對齊
 if raw_df.index.tz is not None:
-    ts_start = ts_start.tz_localize(raw_df.index.tz)
-    ts_end = ts_end.tz_localize(raw_df.index.tz)
+    ts_start, ts_end = ts_start.tz_localize(raw_df.index.tz), ts_end.tz_localize(raw_df.index.tz)
 
-# 回測與 K 棒時間軸完全連動
 df = raw_df.loc[ts_start:ts_end].copy()
 
-if df.empty:
-    st.error(f"🚨 系統錯誤: ERR-303 ({ERROR_MAP['ERR-303']})")
-    st.stop()
+# [功能] 決策大腦映射
+engine_choice = st.sidebar.selectbox(
+    "1. 選擇決策大腦 (邏輯核心)",
+    ("法人 3L-Strict (0.33門檻)", "法人 3L-Relaxed (0門檻)", "MAD 均線距離策略", "基礎指標模型 (MACD/ATR)")
+)
 
-# 策略選擇邏輯
-engine_choice = st.sidebar.selectbox("1. 選擇決策大腦", ("法人 3L-Strict (0.33門檻)", "法人 3L-Relaxed (0門檻)", "MAD 均線距離策略", "基礎指標模型"))
-strategy_type = st.sidebar.radio("2. 選擇操作工具", ("純微台期 (10元/點)", "期貨 + 選擇權賣方 (收租型)", "純買方 (Long Call/Put)", "價差策略 (Bull/Bear Spread)", "中性盤整 (鐵蝴蝶)"))
+strategy_type = st.sidebar.radio(
+    "2. 選擇操作策略",
+    ("純微台期 (10元/點)", "期貨 + 選擇權賣方 (收租型)", "純買方 (Long Call/Put)", "價差策略 (Bull/Bear Spread)", "中性盤整 (鐵蝴蝶 Iron Butterfly)")
+)
 
-# 風控插件設定
+# [功能] 風險控管插件
 st.sidebar.header("🛡️ 風險控管插件")
-use_rm = st.sidebar.checkbox("開啟 ATR 動態風控與 7 天平倉")
+use_rm = st.sidebar.checkbox("開啟 ATR 動態風控與 7 天平倉", value=True)
 
-# --- 映射邏輯 ---
-brain_map = {"法人 3L-Strict (0.33門檻)": "3L_Strict", "法人 3L-Relaxed (0門檻)": "3L_Relaxed", "MAD 均線距離策略": "MAD", "基礎指標模型": "Dir"}
+# --- 映射邏輯 (嚴格對齊後端) ---
+brain_map = {"法人 3L-Strict (0.33門檻)": "3L_Strict", "法人 3L-Relaxed (0門檻)": "3L_Relaxed", "MAD 均線距離策略": "MAD", "基礎指標模型 (MACD/ATR)": "Dir"}
 tool_map = {"純微台期 (10元/點)": "Micro", "期貨 + 選擇權賣方 (收租型)": "Seller", "純買方 (Long Call/Put)": "Buy", "價差策略 (Bull/Bear Spread)": "Spread"}
 
 b_prefix = brain_map.get(engine_choice, "Dir")
@@ -78,41 +78,80 @@ pnl_col = f"{b_prefix}_{t_prefix}{rm_suffix}_PnL_TWD"
 signal_col = f"Signal_{b_prefix}"
 pos_col = f"Pos_{b_prefix}"
 
-# --- 欄位診斷代碼 ---
-if pnl_col not in df.columns or signal_col not in df.columns:
-    st.error(f"🚨 系統錯誤: ERR-202 (欄位缺失)")
-    st.info(f"**診斷資訊**: 找不到損益欄位 `{pnl_col}` 或訊號欄位 `{signal_col}`。")
-    st.caption("請確認 GitHub Actions 已完成且產出了對應的 RM 風控欄位。")
+# 鐵蝴蝶獨立判定
+if "鐵蝴蝶" in strategy_type:
+    signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
+
+# --- 欄位診斷代碼 (Debug) ---
+if pnl_col not in df.columns:
+    st.error(f"🚨 系統診斷代碼: ERR-202 (欄位缺失)")
+    st.info(f"**診斷資訊**: 找不到損益欄位 `{pnl_col}`。請確認 update_data.py 已成功產出對應欄位。")
     st.stop()
 
 # -------------------------
-# 2. 核心績效計算 (包含 MDD)
+# 2. 即時診斷與操作建議 (新增功能塊)
+# -------------------------
+st.header("🔍 即時診斷與操作建議")
+if not df.empty:
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2] if len(df) > 1 else last_row
+    score = last_row.get('Composite_Score', 0)
+    prev_score = prev_row.get('Composite_Score', 0)
+
+    # 診斷狀態邏輯
+    if score >= 0.66: diag = "🔥 多頭持續 (強勁趨勢)"
+    elif score > 0 and prev_score <= 0: diag = "🚀 多頭開始 (初升發動)"
+    elif score > 0 and score < prev_score: diag = "⚠️ 多頭勢歇 (動能減弱)"
+    elif score <= -0.66: diag = "❄️ 空頭持續 (強勁趨勢)"
+    elif score < 0 and prev_score >= 0: diag = "📉 空頭開始 (起跌確認)"
+    elif score < 0 and score > prev_score: diag = "🩹 空頭勢歇 (跌勢趨緩)"
+    else: diag = "🔄 盤整持續"
+
+    support, resistance = df['Low'].tail(100).min(), df['High'].tail(100).max()
+    suggested_pos = int(last_row.get(pos_col, 0)) if last_row.get(signal_col, 0) != 0 else 0
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("當前盤勢診斷", diag)
+    d2.metric("關鍵支撐 / 壓力", f"{support:.0f} / {resistance:.0f}")
+    d3.metric("目前建議口數", f"{suggested_pos} 口" if suggested_pos > 0 else "觀望")
+
+# -------------------------
+# 3. 核心績效計算 (找回 夏普值 與 MDD)
 # -------------------------
 trades = df[df[signal_col] != 0].copy()
-if not trades.empty:
-    trades['Cum_PnL'] = trades[pnl_col].cumsum()
-    running_max = trades['Cum_PnL'].cummax()
-    mdd = (trades['Cum_PnL'] - running_max).min()
-    
-    st.divider()
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("總交易次數", f"{len(trades)} 次")
-    c2.metric("策略勝率", f"{(len(trades[trades[pnl_col]>0])/len(trades)*100):.1f}%")
-    c3.metric("累積總損益", f"NT$ {trades['Cum_PnL'].iloc[-1]:,.0f}")
-    c4.metric("最大回撤 (MDD)", f"NT$ {mdd:,.0f}")
-    c5.metric("單筆期望值", f"NT$ {trades[pnl_col].mean():.0f}")
+if trades.empty:
+    st.warning(f"⚠️ 診斷代碼: ERR-303 (此區間無訊號)")
+    st.stop()
+
+trade_results = trades[pnl_col].dropna()
+trades['Cumulative_PnL'] = trade_results.cumsum()
+
+# [公式] 夏普值計算 (年化)
+# $$\text{Sharpe Ratio} = \frac{\text{Mean}(PnL)}{\text{Std}(PnL)} \times \sqrt{252}$$
+sharpe = (trade_results.mean() / trade_results.std() * np.sqrt(252)) if trade_results.std() != 0 else 0
+
+# [公式] 最大回撤 (MDD)
+# $$\text{MDD} = \min(PnL_{cum} - \max(PnL_{cum}))$$
+running_max = trades['Cumulative_PnL'].cummax()
+mdd = (trades['Cumulative_PnL'] - running_max).min()
+
+st.divider()
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("總交易次數", f"{len(trade_results)} 次")
+c2.metric("策略勝率", f"{(len(trade_results[trade_results > 0]) / len(trade_results) * 100):.1f}%")
+c3.metric("策略夏普值", f"{sharpe:.2f}")
+c4.metric("最大回撤 (MDD)", f"NT$ {mdd:,.0f}")
+c5.metric("累積總損益", f"NT$ {trades['Cumulative_PnL'].iloc[-1]:,.0f}")
 
 # -------------------------
-# 3. 專業級 K 線視覺化 (同步日期軸)
+# 4. 專業級 K 線視覺化 (真實感增強版)
 # -------------------------
-st.subheader("📊 回測期間 K 線標示 (顯示年月日軸)")
-
-# 為了讓 K 棒保持真實感，過濾資料量避免圖表過載
-plot_df = df.tail(150) if len(df) > 150 else df 
+st.subheader("📊 走勢標示 (專業交易終端模式)")
+plot_df = df.tail(150) # 確保 K 棒飽滿不變形
 
 fig_k = go.Figure()
 
-# 主 K 線：優化飽滿度與專業紅綠配色
+# 主 K 線：專業紅綠配色
 fig_k.add_trace(go.Candlestick(
     x=plot_df.index,
     open=plot_df['Open'], high=plot_df['High'], 
@@ -122,35 +161,52 @@ fig_k.add_trace(go.Candlestick(
     name="台指1H K線"
 ))
 
-# 訊號標示：偏移量避開 K 棒主體
-for s, c, sym, ref, offset in [(1, '#FFD700', 'triangle-up', 'Low', -100), (-1, '#00F0FF', 'triangle-down', 'High', 100)]:
+# 支撐壓力線
+fig_k.add_hline(y=support, line_dash="dash", line_color="#2ECC71", opacity=0.6, annotation_text="支撐")
+fig_k.add_hline(y=resistance, line_dash="dash", line_color="#E74C3C", opacity=0.6, annotation_text="壓力")
+
+# 訊號標示 (偏移量避免重疊)
+for s, c, sym, ref, offset in [(1, '#FFD700', 'triangle-up', 'Low', -120), (-1, '#00F0FF', 'triangle-down', 'High', 120)]:
     sigs = plot_df[plot_df[signal_col] == s]
     if not sigs.empty:
         fig_k.add_trace(go.Scatter(
-            x=sigs.index, 
-            y=sigs[ref] + offset,
+            x=sigs.index, y=sigs[ref] + offset,
             mode='markers+text',
-            marker=dict(symbol=sym, color=c, size=15),
+            marker=dict(symbol=sym, color=c, size=15, line=dict(width=1, color='white')),
             text=sigs[pos_col].astype(int).astype(str) + "口",
             textposition="bottom center" if s == 1 else "top center",
             name="進場訊號"
         ))
 
-# 佈局優化：解決消失問題、格式化年月日
 fig_k.update_layout(
-    height=600, template="plotly_dark",
-    xaxis_rangeslider_visible=False,
+    height=600, template="plotly_dark", xaxis_rangeslider_visible=False,
     xaxis=dict(
-        type='date',
-        tickformat='%Y-%m-%d',  # 僅顯示年月日
-        rangebreaks=[dict(bounds=["sat", "mon"])], # 隱藏週末空白
-        gridcolor='rgba(255,255,255,0.05)'
+        type='date', 
+        tickformat='%Y-%m-%d', 
+        rangebreaks=[dict(bounds=["sat", "mon"])] # 隱藏週末
     ),
     yaxis=dict(side="right", gridcolor='rgba(255,255,255,0.05)'),
-    margin=dict(l=10, r=10, t=10, b=10)
+    margin=dict(l=10, r=10, t=30, b=10)
 )
 st.plotly_chart(fig_k, use_container_width=True)
 
-# 4. 下載按鈕 (側邊欄)
+# -------------------------
+# 5. 累積損益圖與明細 (保留美化格式)
+# -------------------------
+st.subheader("💰 累積損益曲線")
+fig_pnl = go.Figure(data=[go.Scatter(
+    x=trades.index, y=trades['Cumulative_PnL'], 
+    mode='lines', fill='tozeroy', 
+    line=dict(color='rgba(50, 205, 50, 0.8)')
+)])
+fig_pnl.update_layout(height=300, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+st.plotly_chart(fig_pnl, use_container_width=True)
+
+st.subheader("📋 交易紀錄與多空實證明細")
+st.dataframe(trades[['Close', 'YZ_Vol', 'Composite_Score', pnl_col, 'Cumulative_PnL']].sort_index(ascending=False).style.format({
+    'Close': '{:.0f}', 'YZ_Vol': '{:.2%}', 'Composite_Score': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
+}))
+
+# 下載按鈕 (側邊欄)
 st.sidebar.divider()
-st.sidebar.download_button("📥 下載目前回測 CSV", df.to_csv().encode('utf-8-sig'), "backtest_data.csv")
+st.sidebar.download_button("📥 下載目前回測 CSV", df.to_csv().encode('utf-8-sig'), "backtest_final.csv")
