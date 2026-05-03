@@ -46,31 +46,36 @@ strategy_type = st.sidebar.radio(
     )
 )
 
-# --- 核心邏輯：動態欄位映射 ---
-# 設定大腦前綴
+# --- 核心邏輯：動態欄位映射 (與後端 update_data.py 命名空間對接) ---
+# 1. 決定大腦前綴
 if "3L-Strict" in engine_choice:
-    prefix, pos_col, signal_col = '3L_Strict', 'Pos_3L_Strict', 'Signal_3L_Strict'
+    brain_prefix = '3L_Strict'
 elif "3L-Relaxed" in engine_choice:
-    prefix, pos_col, signal_col = '3L_Relaxed', 'Pos_3L_Relaxed', 'Signal_3L_Relaxed'
+    brain_prefix = '3L_Relaxed'
 elif "MAD" in engine_choice:
-    prefix, pos_col, signal_col = 'MAD', 'Pos_MAD', 'Signal_MAD'
+    brain_prefix = 'MAD'
 else:
-    prefix, pos_col, signal_col = 'Dir', 'Pos_Dir', 'Signal_Dir'
+    brain_prefix = 'Dir'
 
-# 根據操作工具設定損益欄位 (對應 update_data.py 生成的欄位)
+# 預設通用欄位
+signal_col = f'Signal_{brain_prefix}'
+pos_col = f'Pos_{brain_prefix}'
+
+# 2. 決定工具尾綴並組合對應的 PnL 欄位
 if "純微台期" in strategy_type:
-    pnl_col = 'Micro_PnL_TWD'
+    pnl_col = f'{brain_prefix}_Micro_PnL_TWD'
     desc = "【微台策略】無時間價值流失，單純追蹤日K趨勢，持有 10 天波段利潤。"
 elif "賣方" in strategy_type:
-    pnl_col = 'Seller_PnL_TWD'
-    desc = "【期貨+賣方收租】期貨部位搭配賣出價外選擇權，利用 10 天的時間價值流失貼補成本。"
+    pnl_col = f'{brain_prefix}_Seller_PnL_TWD'
+    desc = "【期貨+賣方收租】期貨部位搭配賣出價外選擇權，利用 10 天的時間價值貼補成本。"
 elif "純買方" in strategy_type:
-    pnl_col = f"{prefix}_PnL_TWD"
-    desc = "【純買方】追求高槓桿爆發力，但在 10 天長線持有下須承擔巨大的時間價值損耗。"
+    pnl_col = f'{brain_prefix}_Buy_PnL_TWD'
+    desc = "【純買方】追求高槓桿爆發力，但在 10 天長線持有下須承擔較大的時間價值損耗。"
 elif "價差策略" in strategy_type:
-    pnl_col = f"{prefix}_Spread_PnL_TWD"
+    pnl_col = f'{brain_prefix}_Spread_PnL_TWD'
     desc = "【價差策略】透過賣出遠端合約降低成本，持有 10 天的抗震能力優於純買方。"
 else:
+    # 鐵蝴蝶為獨立策略，不依賴上述大腦前綴
     signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
     desc = "【中性鐵蝴蝶】預期市場 10 天內進入狹幅盤整，賺取權利金點數。"
 
@@ -79,7 +84,7 @@ st.info(desc)
 
 # --- 防呆檢查 ---
 if signal_col not in df.columns or pnl_col not in df.columns:
-    st.error(f"🚨 找不到對應欄位 (Signal: {signal_col}, PnL: {pnl_col})。請確保 GitHub 上的 CSV 檔案已根據最新邏輯更新。")
+    st.error(f"🚨 找不到對應欄位 (訊號: {signal_col}, 損益: {pnl_col})。請確保 GitHub 上的 CSV 檔案已根據最新邏輯更新。")
     st.stop()
 
 # -------------------------
@@ -110,7 +115,7 @@ col5.metric("累積總損益", f"NT$ {total_pnl:,.0f}")
 # -------------------------
 # 3. 繪製圖表 (累積損益 & K線)
 # -------------------------
-st.subheader("💰 累積損益曲線 (波段持有 10 天)")
+st.subheader("💰 累積損益曲線 (持有期間：10 天波段)")
 if len(trades) > 0:
     fig_pnl = go.Figure()
     line_color = 'rgba(50, 205, 50, 0.8)' if total_pnl > 0 else 'rgba(255, 69, 0, 0.8)'
@@ -122,20 +127,21 @@ if len(trades) > 0:
     fig_pnl.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig_pnl, use_container_width=True)
 
-st.subheader("📊 進出場點位標示 (近期 300 根 60K K線)")
+st.subheader("📊 近期進出場點位標示 (顯示最後 300 根 60K K線)")
 plot_df = df.tail(300)
 fig_k = go.Figure(data=[go.Candlestick(
     x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], 
     low=plot_df['Low'], close=plot_df['Close'], name="台指K線"
 )])
 
+# 標示買賣點 (使用 Entry_Price 確保貼近實戰開盤進場)
 for s, c, name, sym in [(1, 'red', '多頭佈局', 'triangle-up'), (-1, 'green', '空頭佈局', 'triangle-down')]:
     sigs = plot_df[plot_df[signal_col] == s]
     if not sigs.empty:
         fig_k.add_trace(go.Scatter(
             x=sigs.index, y=sigs['Entry_Price'], mode='markers+text', 
             marker=dict(symbol=sym, color=c, size=14), 
-            name=name, text=sigs[pos_col].astype(int).astype(str) + " 組"
+            name=name, text=sigs[pos_col].astype(int).astype(str) + (" 組" if "鐵蝴蝶" in strategy_type else " 口")
         ))
 
 fig_k.update_layout(height=550, xaxis_rangeslider_visible=False)
@@ -154,11 +160,11 @@ if not trades.empty:
         'MAD_Value': '{:.2f}', pnl_col: '{:.0f}', 'Cumulative_PnL': '{:.0f}'
     }))
 
-# CSV 下載
+# 提供資料下載
 csv = df.to_csv().encode('utf-8-sig')
 st.download_button(
-    label="📥 下載完整回測數據 CSV",
+    label="📥 下載完整回測數據 CSV (含複合策略指標)",
     data=csv,
-    file_name='txf_full_backtest.csv',
+    file_name='txf_final_backtest.csv',
     mime='text/csv',
 )
