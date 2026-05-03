@@ -5,8 +5,8 @@ import numpy as np
 import os
 from datetime import datetime, timedelta
 
-# --- [最高指導原則] 功能回歸、順序校正、視覺真實 ---
-st.set_page_config(page_title="台指期權回測系統", layout="wide")
+# --- 最高指導原則：框架完整、功能找回、視覺真實 ---
+st.set_page_config(page_title="台指期權專業回測系統", layout="wide")
 
 @st.cache_data(ttl=300)
 def load_data():
@@ -25,13 +25,14 @@ st.title("📈 台指期權量化回測系統 (專業全功能版)")
 # -------------------------
 st.sidebar.header("⚙️ 引擎與期間")
 if init_err:
-    st.error(f"🚨 錯誤代碼: {init_err} (找不到 CSV)")
+    st.error(f"🚨 系統診斷: {init_err} (找不到資料檔案)")
     st.stop()
 
 max_date = raw_df.index.max()
-start_date = st.sidebar.date_input("回測開始", value=max_date - timedelta(days=365))
-end_date = st.sidebar.date_input("回測結束", value=max_date)
+start_date = st.sidebar.date_input("回測開始日期", value=max_date - timedelta(days=365))
+end_date = st.sidebar.date_input("回測結束日期", value=max_date)
 
+# 時區對齊
 ts_start = pd.Timestamp(start_date)
 ts_end = pd.Timestamp(end_date) + pd.Timedelta(hours=23)
 if raw_df.index.tz is not None:
@@ -39,16 +40,13 @@ if raw_df.index.tz is not None:
 
 df = raw_df.loc[ts_start:ts_end].copy()
 
-# 映射邏輯 (嚴格對齊)
-brain_list = ["法人 3L-Strict (0.33門檻)", "法人 3L-Relaxed (0門檻)", "MAD 均線距離策略", "基礎指標模型 (MACD/ATR)"]
-tool_list = ["純微台期 (10元/點)", "期貨 + 選擇權賣方 (收租型)", "純買方 (Long Call/Put)", "價差策略 (Bull/Bear Spread)", "中性盤整 (鐵蝴蝶)"]
-
-engine_choice = st.sidebar.selectbox("1. 選擇大腦", brain_list)
-strategy_choice = st.sidebar.radio("2. 選擇工具", tool_list)
-use_rm = st.sidebar.checkbox("開啟 ATR 風控與 7 天平倉", value=True)
-
+# 映射配置
 b_map = {"法人 3L-Strict (0.33門檻)": "3L_Strict", "法人 3L-Relaxed (0門檻)": "3L_Relaxed", "MAD 均線距離策略": "MAD", "基礎指標模型 (MACD/ATR)": "Dir"}
 t_map = {"純微台期 (10元/點)": "Micro", "期貨 + 選擇權賣方 (收租型)": "Seller", "純買方 (Long Call/Put)": "Buy", "價差策略 (Bull/Bear Spread)": "Spread"}
+
+engine_choice = st.sidebar.selectbox("1. 選擇決策大腦", list(b_map.keys()))
+strategy_choice = st.sidebar.radio("2. 選擇操作工具", list(t_map.keys()))
+use_rm = st.sidebar.checkbox("開啟 ATR 風控與 7 天平倉", value=True)
 
 b_prefix = b_map.get(engine_choice)
 t_prefix = t_map.get(strategy_choice)
@@ -58,32 +56,19 @@ pnl_col = f"{b_prefix}_{t_prefix}{rm_suffix}_PnL_TWD"
 signal_col = f"Signal_{b_prefix}"
 pos_col = f"Pos_{b_prefix}"
 
-if "鐵蝴蝶" in strategy_choice:
-    signal_col, pnl_col, pos_col = 'Signal_IB', 'IB_PnL_TWD', 'Pos_IB'
-
 # -------------------------
-# 2. 診斷與績效看板
+# 2. 績效看板 (找回所有功能)
 # -------------------------
-st.header("🔍 即時診斷與目前操作建議")
-if not df.empty:
-    last = df.iloc[-1]
-    score = last.get('Composite_Score', 0)
-    diag = "🔥 多頭持續" if score >= 0.66 else "🚀 多頭開始" if score > 0 else "❄️ 空頭持續" if score <= -0.66 else "🔄 盤整震盪"
-    
-    d1, d2, d3 = st.columns(3)
-    d1.metric("當前盤勢", diag)
-    d2.metric("關鍵支撐 / 壓力", f"{df['Low'].tail(60).min():.0f} / {df['High'].tail(60).max():.0f}")
-    d3.metric("建議口數", f"{int(last.get(pos_col, 0))} 口" if last.get(signal_col,0) != 0 else "觀望")
-
 if pnl_col not in df.columns:
     st.error(f"🚨 診斷代碼: ERR-202 (缺失欄位: {pnl_col})")
     st.stop()
 
-# 績效計算
 trades = df[df[signal_col] != 0].copy()
 if not trades.empty:
     trade_results = trades[pnl_col].dropna()
     trades['Cum_PnL'] = trade_results.cumsum()
+    
+    # 績效指標計算
     sharpe = (trade_results.mean() / trade_results.std() * np.sqrt(252)) if trade_results.std() != 0 else 0
     mdd = (trades['Cum_PnL'] - trades['Cum_PnL'].cummax()).min()
 
@@ -96,30 +81,28 @@ if not trades.empty:
     c5.metric("累積總損益", f"NT$ {trades['Cum_PnL'].iloc[-1]:,.0f}")
 
     # -------------------------
-    # 3. 圖表顯示 (順序校正)
+    # 3. 圖表渲染 (損益在上，K棒在下)
     # -------------------------
-    # (1) 損益曲線在上
-    st.subheader("💰 累積損益曲線")
+    st.subheader("💰 累積損益曲線 (Equity Curve)")
     fig_pnl = go.Figure(data=[go.Scatter(x=trades.index, y=trades['Cum_PnL'], mode='lines', fill='tozeroy', line=dict(color='#00FFCC'))])
-    fig_pnl.update_layout(height=300, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+    fig_pnl.update_layout(height=350, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig_pnl, use_container_width=True)
 
-    # (2) 專業 K 線在下 (視覺優化)
-    st.subheader("📊 走勢標示 (專業交易終端模式)")
-    # 為了畫面飽滿，取回測區間的最近 120 天
-    plot_df = df.tail(120)
+    st.subheader("📊 走勢標示 (專業交易終端模式 - 日K)")
+    plot_df = df.tail(150) # 限制顯示根數確保 K 棒飽滿
     
     fig_k = go.Figure()
+    # 主 K 線：使用 category 軸強制移除週末，使 K 棒真實飽滿
     fig_k.add_trace(go.Candlestick(
-        x=plot_df.index.strftime('%Y-%m-%d'), # 改為字串格式搭配 category 軸
+        x=plot_df.index.strftime('%Y-%m-%d'),
         open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'],
         increasing_line_color='#FF3232', decreasing_line_color='#32FF32',
         increasing_fillcolor='#FF3232', decreasing_fillcolor='#32FF32',
         name="台指日K"
     ))
 
-    # 訊號位移標示
-    for s, c, sym, ref, offset in [(1, '#FFD700', 'triangle-up', 'Low', -150), (-1, '#00F0FF', 'triangle-down', 'High', 150)]:
+    # 訊號標示 (偏移避讓)
+    for s, c, sym, ref, offset in [(1, '#FFD700', 'triangle-up', 'Low', -200), (-1, '#00F0FF', 'triangle-down', 'High', 200)]:
         sigs = plot_df[plot_df[signal_col] == s]
         if not sigs.empty:
             fig_k.add_trace(go.Scatter(
@@ -139,7 +122,7 @@ if not trades.empty:
     )
     st.plotly_chart(fig_k, use_container_width=True)
 
-# 4. 明細
+# 4. 下載與明細
 st.subheader("📋 交易明細紀錄")
 st.dataframe(trades[['Close', 'YZ_Vol', 'Composite_Score', pnl_col, 'Cum_PnL']].sort_index(ascending=False).style.format("{:.0f}"))
 st.sidebar.download_button("📥 下載數據 CSV", df.to_csv().encode('utf-8-sig'), "backtest.csv")
