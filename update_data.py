@@ -18,6 +18,10 @@ def fetch_and_process_data():
         print("無法取得資料，請檢查網路或 API。")
         return
 
+    # 🔥 關鍵修復：攤平 yfinance 新版產生的雙層欄位索引 (MultiIndex)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+
     df.dropna(inplace=True)
     
     # -------------------------
